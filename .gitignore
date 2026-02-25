@@ -1,5 +1,6 @@
 *
 
+!images/
 !images/*
 !color_picker.py
 !main_1.py
