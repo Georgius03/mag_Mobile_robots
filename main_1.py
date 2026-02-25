@@ -399,7 +399,7 @@ def main():
     if config['camera']['online']:
         cap = cv2.VideoCapture(0)
     else:
-        cap = cv2.VideoCapture(r"computer_vision_mag\images\2026-02-1713-42-22.mp4")
+        cap = cv2.VideoCapture(config['camera']['video_dir'])
 
     if not cap.isOpened():
         raise RuntimeError("Ошибка открытия видео")
