@@ -1,10 +1,2 @@
-*
-
-!images/
-!images/*
-!color_picker.py
-!src/
-!src/*
-!parameters.yaml
-!requirements.txt
-!README.md
+test/
+logs/
