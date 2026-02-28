@@ -7,7 +7,10 @@ import cv2.aruco as aruco
 import numpy as np
 
 from typing import Tuple, Optional, List, Dict
-from robotino_communication import connect_to_robotino, send_velocity
+
+from robotino_communication import *
+from apf_utils import *
+
 
 with open('parameters.yaml') as config_file:
     config = yaml.safe_load(config_file)
@@ -110,7 +113,7 @@ def main():
     if config['camera']['online']:
         cap = cv2.VideoCapture(0)
     else:
-        cap = cv2.VideoCapture(r"computer_vision_mag\images\2026-02-1713-42-22.mp4")
+        cap = cv2.VideoCapture(config['camera']['video_path'])
 
     if not cap.isOpened():
         raise RuntimeError("Ошибка открытия видео")
@@ -272,7 +275,7 @@ def main():
 
                 if motion_started and not motion_started_flag:
                     motion_started_flag = True
-                    init_logger("robot_motion_log_2_3.csv")
+                    init_logger(config['utils']['log_dir'] + "robot_motion_log_2_3.csv")
                     print("Движение начато")
                 elif not motion_started and motion_started_flag:
                     motion_started_flag = False

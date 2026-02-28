@@ -8,7 +8,7 @@ import numpy as np
 
 from typing import Tuple, Optional
 
-from src.utils.robotino_communication import connect_to_robotino, send_velocity
+from robotino_communication import connect_to_robotino, send_velocity
 
 with open('parameters.yaml') as config_file:
     config = yaml.safe_load(config_file)
@@ -63,7 +63,6 @@ def write_log(t: float, pos: np.ndarray, vel: np.ndarray):
         f"{speed:.6f}"
     ])
 
-
 def main():
 
     global click_point
@@ -94,7 +93,7 @@ def main():
     if config['camera']['online']:
         cap = cv2.VideoCapture(0)
     else:
-        cap = cv2.VideoCapture(config['camera']['video_dir'])
+        cap = cv2.VideoCapture(config['camera']['video_path'])
 
     if not cap.isOpened():
         raise RuntimeError("Ошибка открытия видео")
@@ -234,7 +233,7 @@ def main():
 
                 if motion_started and not motion_started_flag:
                     motion_started_flag = True
-                    init_logger("robot_motion_log_1.csv")
+                    init_logger(config['utils']['log_dir'] + "robot_motion_log_1.csv")
                     print("Движение начато")
                 elif not motion_started and motion_started_flag:
                     motion_started_flag = False

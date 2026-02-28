@@ -1,7 +1,4 @@
-import math, time, csv
-import socket, requests
 import yaml
-import heapq
 
 import cv2
 import cv2.aruco as aruco
