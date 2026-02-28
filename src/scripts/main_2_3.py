@@ -8,8 +8,11 @@ import numpy as np
 
 from typing import Tuple, Optional, List, Dict
 
-from robotino_communication import *
-from apf_utils import *
+from utils import robotino_communication
+from utils import apf_utils
+from utils import robotino_utils
+from core import movement
+from core import path_planners
 
 
 with open('parameters.yaml') as config_file:
