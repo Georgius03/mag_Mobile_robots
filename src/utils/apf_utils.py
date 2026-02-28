@@ -1,8 +1,13 @@
 import cv2
 import cv2.aruco as aruco
 import numpy as np
+import yaml
 
 from typing import Tuple, Optional, List, Dict
+
+
+with open('parameters.yaml') as config_file:
+    config = yaml.safe_load(config_file)
 
 # Расчёт вектора скорости от потенциального поля
 def compute_repulsive_velocity_fast(

@@ -1,10 +1,15 @@
 import heapq
+import yaml
 
 import cv2
 import cv2.aruco as aruco
 import numpy as np
 
 from typing import Tuple, Optional, List, Dict
+
+
+with open('parameters.yaml') as config_file:
+    config = yaml.safe_load(config_file)
 
 # Расчёт расстояния между точками старта и целью
 def heuristic(

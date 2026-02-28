@@ -4,7 +4,6 @@ import yaml
 
 with open('parameters.yaml') as config_file:
     config = yaml.safe_load(config_file)
-
     
 # Подключение к Robotino
 def connect_to_robotino():

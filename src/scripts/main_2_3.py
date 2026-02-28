@@ -8,11 +8,11 @@ import numpy as np
 
 from typing import Tuple, Optional, List, Dict
 
-from utils.robotino_communication import *
-from utils.apf_utils import *
-from utils.robotino_utils import *
-from core.movement import *
-from core.path_planners import *
+from src.utils.robotino_communication import *
+from src.utils.apf_utils import *
+from src.utils.robotino_utils import *
+from src.core.movement import *
+from src.core.path_planners import *
 
 
 with open('parameters.yaml') as config_file:
@@ -116,7 +116,7 @@ def main():
     if config['camera']['online']:
         cap = cv2.VideoCapture(0)
     else:
-        cap = cv2.VideoCapture(config['camera']['video_path'])
+        cap = cv2.VideoCapture(config['utils']['video_path'])
 
     if not cap.isOpened():
         raise RuntimeError("Ошибка открытия видео")

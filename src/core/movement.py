@@ -7,7 +7,7 @@ import numpy as np
 from typing import Tuple, Optional, List, Dict
 
 
-with open('computer_vision_mag\parameters.yaml') as config_file:
+with open('parameters.yaml') as config_file:
     config = yaml.safe_load(config_file)
 
 
