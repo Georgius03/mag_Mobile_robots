@@ -8,7 +8,11 @@ import numpy as np
 
 from typing import Tuple, Optional
 
-from robotino_communication import connect_to_robotino, send_velocity
+from utils import robotino_communication
+from utils import apf_utils
+from utils import robotino_utils
+from core import movement
+from core import path_planners
 
 with open('parameters.yaml') as config_file:
     config = yaml.safe_load(config_file)
