@@ -2,6 +2,7 @@ import cv2
 import cv2.aruco as aruco
 import numpy as np
 import yaml
+import os
 
 from typing import Tuple, Optional, List, Dict
 

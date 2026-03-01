@@ -124,6 +124,14 @@ def main():
             start_time: float = time.time()
 
             ret, frame = cap.read()
+
+            if config['camera']['equalize_hist']:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV)
+                # Выравнивание гистограммы только для канала Y (яркость)
+                frame[:,:,0] = cv2.equalizeHist(frame[:,:,0])
+                # Обратное преобразование в BGR
+                frame = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR)
+
             if config['camera']['sharpening']:
                 frame = cv2.filter2D(frame, -1, SHARPENING_KERNEL)
 
@@ -161,11 +169,14 @@ def main():
                 except ValueError as e:
                     print(e)
 
+            if key == ord("q"):
+                break
+
             if not calibrated:
-                frame = cv2.resize(
-                    frame,
-                    (frame.shape[1] // 2, frame.shape[0] // 2)
-                )
+                # frame = cv2.resize(
+                #     frame,
+                #     (frame.shape[1] // 2, frame.shape[0] // 2)
+                # )
                 cv2.imshow("map_planner", frame)
                 continue
 
@@ -198,7 +209,10 @@ def main():
             # --- HSV ---
             hsv = cv2.cvtColor(working_area, cv2.COLOR_BGR2HSV)
 
-            mask = cv2.inRange(hsv, (0, 100, 135), (179, 255, 255))
+            if config['camera']['equalize_hist']:
+                mask = cv2.inRange(hsv, (0, 200, 80), (179, 255, 255))
+            else:
+                mask = cv2.inRange(hsv, (0, 100, 135), (179, 255, 255))
 
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_denoise)
             mask = cv2.erode(mask, kernel=kernel_denoise, iterations=2)
@@ -219,7 +233,6 @@ def main():
             mask[:, -WALL_WIDTH:] = 255
             # mask[0:-1, 1000:1700] = 255
 
-            
             contours, _ = cv2.findContours(
                 mask,
                 cv2.RETR_TREE,
@@ -284,17 +297,13 @@ def main():
                 velocity: np.ndarray = v_att + v_rep
                 speed: float = float(np.linalg.norm(velocity))
 
-                print(dist)
                 if dist:
                     velocity *= 0
                     motion_started = False
-                print(velocity)
 
                 if speed > config['move']['max_speed'] and speed > 1e-6:
                     velocity = velocity / speed * config['move']['max_speed']
 
-
-                print(velocity)
                 comp_matrix = np.array([[0, -1],
                                         [1, 0]])
 

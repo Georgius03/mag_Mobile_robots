@@ -26,10 +26,17 @@ cv2.setTrackbarPos('mV', 'Trackbars', 255)
 cap = cv2.VideoCapture(0)
 
 rainbow = cv2.imread('images/rainbow.jpg', 1)
-rainbow = cv2.resize(rainbow, (800, 600))
+rainbow = cv2.resize(rainbow, (400, 300))
 
 while True:
     ret, img = cap.read()
+    
+    frame = cv2.cvtColor(img, cv2.COLOR_BGR2YUV)
+    # Выравнивание гистограммы только для канала Y (яркость)
+    frame[:,:,0] = cv2.equalizeHist(frame[:,:,0])
+    # Обратное преобразование в BGR
+    img = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR)
+    
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     rainbow_hsv = cv2.cvtColor(rainbow, cv2.COLOR_BGR2HSV)
 
@@ -47,8 +54,8 @@ while True:
     cv2.imshow('Mask', mask)
 
     masked_image = cv2.bitwise_and(img, img, mask=mask)
-    # cv2.imshow('Trackbars', masked_image)
-    cv2.imshow('test', masked_image)
+    cv2.imshow('Trackbars', masked_image)
+    # cv2.imshow('test', masked_image)
 
     rainbow_show = cv2.bitwise_and(rainbow, rainbow, mask=rainbow_mask)
     cv2.imshow('Rainbow', rainbow_show)

@@ -174,10 +174,12 @@ def draw_path(
     path: list[tuple[int, int]],
     step: int,
     point_radius: int = 20,
-    line_thickness: int = 5
+    line_thickness: int = 5,
+    circle_color: tuple = (128, 0, 255),
+    line_color: tuple = (0, 128, 255),
 ) -> None:
     """
-    Отрисовывает путь A* поверх изображения:
+    Отрисовывает путь робота поверх изображения:
     - узлы (круги)
     - соединяющие сегменты (линии)
 
@@ -186,6 +188,8 @@ def draw_path(
     :param step: размер клетки сетки (px)
     :param point_radius: радиус отображаемых точек (px)
     :param line_thickness: толщина линии (px)
+    :param circle_color: цвет точек (BGR)
+    :param line_color: цвет линий (BGR)
     """
 
     if len(path) < 2:
@@ -205,7 +209,7 @@ def draw_path(
             image,
             pixel_points[i],
             pixel_points[i + 1],
-            (0, 128, 255),
+            line_color,
             line_thickness
         )
 
@@ -215,7 +219,7 @@ def draw_path(
             image,
             point,
             point_radius,
-            (128, 0, 255),
+            circle_color,
             -1
         )
 
@@ -411,5 +415,5 @@ def print_path_info(
     print(f"Path length (px)   : {length_px:.3f} px")
     print(f"Direct distance    : {direct_dist_px:.3f} px")
     print("--------------------------------")
-    print(f"Curvature ratio    : {curvature_ratio:.3f}")
+    print(f"Tortuosity    : {curvature_ratio:.3f}")
     print("================================\n")

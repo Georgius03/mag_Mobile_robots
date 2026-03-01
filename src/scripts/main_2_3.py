@@ -30,6 +30,8 @@ current_target_index: int = 0
 need_replan: bool = False
 click_point_changed: bool = False
 path: List[Tuple[int, int]] = []
+# path2: List[Tuple[int, int]] = []
+# path3: List[Tuple[int, int]] = []
 enable_replan: bool = False
 
 # Отклик при нажатии кнопки cccмыши
@@ -66,10 +68,10 @@ def init_logger(filename: str):
     global log_file, csv_writer
     log_file = open(filename, "w", newline='')
     csv_writer = csv.writer(log_file)
-    csv_writer.writerow(["time_s", "pos_x_px", "pos_y_px", "vx_px_s", "vy_px_s", "speed_px_s"])
+    csv_writer.writerow(["time_s", "pos_x_px", "pos_y_px", "vx_px_s", "vy_px_s", "speed_px_s", "target_x_px", "target_y_px"])
 
 # Логирование данных в файл
-def write_log(t: float, pos: np.ndarray, vel: np.ndarray):
+def write_log(t: float, pos: np.ndarray, vel: np.ndarray, target: np.ndarray):
     global csv_writer
     speed: float = float(np.linalg.norm(vel))
     csv_writer.writerow([
@@ -78,7 +80,9 @@ def write_log(t: float, pos: np.ndarray, vel: np.ndarray):
         f"{pos[1]:.3f}",
         f"{vel[0]:.6f}",
         f"{vel[1]:.6f}",
-        f"{speed:.6f}"
+        f"{speed:.6f}",
+        f"{target[0]:.6f}"
+        f"{target[1]:.6f}"
     ])
 
 
@@ -92,8 +96,10 @@ def main():
     global current_target_index
     global need_replan
     global click_point_changed
-    global path
     global enable_replan
+    global path
+    # global path2
+    # global path3
 
     if config['socket_params']['enable']:
         sock = connect_to_robotino()
@@ -147,6 +153,14 @@ def main():
             start_time: float = time.time()
 
             ret, frame = cap.read()
+
+            if config['camera']['equalize_hist']:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV)
+                # Выравнивание гистограммы только для канала Y (яркость)
+                frame[:,:,0] = cv2.equalizeHist(frame[:,:,0])
+                # Обратное преобразование в BGR
+                frame = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR)
+
             if config['camera']['sharpening']:
                 frame = cv2.filter2D(frame, -1, SHARPENING_KERNEL)
 
@@ -224,7 +238,10 @@ def main():
             # --- HSV ---
             hsv = cv2.cvtColor(working_area, cv2.COLOR_BGR2HSV)
 
-            mask = cv2.inRange(hsv, (0, 100, 135), (179, 255, 255))
+            if config['camera']['equalize_hist']:
+                mask = cv2.inRange(hsv, (0, 200, 80), (179, 255, 255))
+            else:
+                mask = cv2.inRange(hsv, (0, 100, 135), (179, 255, 255))
 
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_denoise)
             mask = cv2.erode(mask, kernel=kernel_denoise, iterations=2)
@@ -317,6 +334,20 @@ def main():
                         start_node,
                         goal_node
                         )
+                    # print_path_info(path, config['grid']['step'])
+                    # path2 = dijkstra(
+                    #     pooled_mask,
+                    #     start_node,
+                    #     goal_node
+                    #     )
+                    # print_path_info(path2, config['grid']['step'])
+                    # path3 = greedy_best_first(
+                    #     pooled_mask,
+                    #     start_node,
+                    #     goal_node
+                    #     )
+                    # print_path_info(path3, config['grid']['step'])
+
                     need_replan = False
 
                 if len(path) > 0:
@@ -350,7 +381,7 @@ def main():
                 else:
                     v_rep = np.array([0, 0])
 
-                v_att = v_att_old + (v_att - v_att_old) * 0.2
+                v_att = v_att_old + (v_att - v_att_old) * config['move']['filter_gain']
 
                 v_att_old = v_att
                 velocity: np.ndarray = v_att + v_rep
@@ -373,12 +404,14 @@ def main():
 
                 rotation_matrix = np.array([[math.cos(angle), -math.sin(angle)],
                                             [math.sin(angle), math.cos(angle)]])
-
+                
+                
                 Vx, Vy = velocity @ comp_matrix @ rotation_matrix
+                # Vx, Vy = 0.0, 0.0
 
                 if motion_started:
                     trajectory.append(robot_position.copy())
-                    write_log(current_time - start_time_task, robot_position, np.array([Vx, Vy]))
+                    write_log(current_time - start_time_task, robot_position, np.array([Vx, Vy]), np.array(curr_target))
                     if config['socket_params']['enable']:
                         send_velocity(Vx, Vy, 0)
                 else:
@@ -429,15 +462,38 @@ def main():
                 draw_path(
                     image=working_area,
                     path=path,
-                    step=config['grid']['step']
+                    step=config['grid']['step'],
+                    circle_color=(0, 128, 255),
+                    line_color=(0, 128, 255),
                 )
+
+                # draw_path(
+                #     image=working_area,
+                #     path=path2,
+                #     step=config['grid']['step'],
+                #     circle_color=(0, 255, 0),
+                #     line_color=(0, 255, 0),
+                # )
+
+                # draw_path(
+                #     image=working_area,
+                #     path=path3,
+                #     step=config['grid']['step'],
+                #     circle_color=(255, 0, 0),
+                #     line_color=(255, 0, 0),
+                # )
+
+                
+                # while True:
+                #     if cv2.waitKey(5) == ord('n'):
+                #         break
 
                 # Отрисовка траектории реального движения робота
                 if len(trajectory) > 1:
                     for i in range(1, len(trajectory)):
                         pt1 = tuple(trajectory[i-1][::-1].astype(int))
                         pt2 = tuple(trajectory[i][::-1].astype(int))
-                        cv2.line(working_area, pt1, pt2, (0, 128, 255), 5)
+                        cv2.line(working_area, pt1, pt2, (255, 0, 255), 10)
                     
                 print(f"Latency = {time.time() - start_time:.4f} s ||| Vx = {Vx:.4f} px/s | Vy = {Vy:.4f} px/s | angle = {math.degrees(angle)}")
                 
