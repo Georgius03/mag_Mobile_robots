@@ -265,7 +265,6 @@ def main():
             mask[-WALL_WIDTH:, :] = 255
             mask[:, :WALL_WIDTH] = 255
             mask[:, -WALL_WIDTH:] = 255
-
             
             pooled_mask = maxpool2D(inflated_mask=mask,
                                       grid_step=config['grid']['step'])
