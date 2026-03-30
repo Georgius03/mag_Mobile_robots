@@ -9,17 +9,32 @@ from typing import Tuple, List, Dict
 
 class Logger:
     def __init__(self, filename: str) -> None:
-        self.log_file = open(filename, "w", newline="")
+        self.filename = filename  # Сохраняем имя файла
+        self.log_file = None
+        self.csv_writer = None
+        self.reset_and_start() # Инициализируем при создании
+        
+        print("Logger initialised!")
+
+    def reset_and_start(self) -> None:
+        """Закрывает старый файл и начинает запись в новый (перезапись)"""
+        if self.log_file is not None:
+            self.log_file.close()
+        
+        # Режим "w" очищает файл при открытии
+        self.log_file = open(self.filename, "w", newline="")
+        self.init_writer()
+
+    def init_writer(self) -> None:
         self.csv_writer = csv.writer(self.log_file)
         self.csv_writer.writerow(["time_s",
                                   "pos_x_px", "pos_y_px",
                                   "vx_px_s", "vy_px_s",
                                   "speed_px_s",
                                   "target_x_px", "target_y_px"])
-        
-        print("Logger initialised!")
-        
-    # Логирование данных в файл
+        # Сбрасываем буфер на диск, чтобы заголовок записался сразу
+        self.log_file.flush()
+
     def write_log(self, t: float, pos: np.ndarray, vel: np.ndarray, target: np.ndarray) -> None:
         speed: float = float(np.linalg.norm(vel))
         self.csv_writer.writerow([
@@ -31,7 +46,8 @@ class Logger:
         ])
     
     def close(self) -> None:
-        self.log_file.close()
+        if self.log_file:
+            self.log_file.close()
 
 class CameraProcessor:
     def __init__(self, config) -> None:
@@ -78,17 +94,19 @@ class CameraProcessor:
     def load_frame(self, frame: np.ndarray) -> None:
         if frame is None:
             raise FileNotFoundError(f"Image not found = None")
+        
         frame = self._frame_preprocessing(frame)
-        self.frame = frame.copy()
         
         if self.system_calibrated_flag:
-            self.display = cv2.warpPerspective(
+            frame = cv2.warpPerspective(
                 frame.copy(),
                 self.perspective_matrix,
                 self.OUTPUT_SIZE
             )
+            self.frame = frame.copy()
         else:
-            self.display = frame.copy()
+            self.frame = frame.copy()
+        self.display = frame.copy()
     
     # Предобработка кадров (выравнивание гистограммы, резкость)
     def _frame_preprocessing(self, frame: np.ndarray) -> np.ndarray:
@@ -222,7 +240,7 @@ class CameraProcessor:
             center=self.trans_center,
             )
         
-        WALL_WIDTH = self.config['apf']['WALL_WIDTH2']
+        WALL_WIDTH = self.config['grid']['WALL_WIDTH']
         mask[:WALL_WIDTH, :] = 255
         mask[-WALL_WIDTH:, :] = 255
         mask[:, :WALL_WIDTH] = 255
@@ -328,6 +346,8 @@ class CameraProcessor:
     def get_robot_attitude(self) -> Tuple[np.ndarray, float]:
         corners, ids, _ = self.aruco_6x6.detectMarkers(self.display)
 
+        center_x, center_y, angle = 0, 0, 0
+        
         if ids is not None:
             c: np.ndarray = corners[0][0]
 
@@ -339,7 +359,7 @@ class CameraProcessor:
 
             angle: float = math.atan2(dx, dy)
         
-        pose_2D: np.ndarray = np.array([center_x, center_y], dtype=np.int16)
+        pose_2D: np.ndarray = np.array([center_x, center_y], dtype=int)
         pose_2D = self._project_floor_point(
             point=pose_2D,
             H=self.config['camera']['H'],
@@ -384,6 +404,13 @@ class CameraProcessor:
             self._find_obstacles()
             self._draw_obstacles()
         return self.display.copy()
+    
+    # Вернуть обработанное изображение
+    def get_mask(self) -> np.ndarray:
+        if self.system_calibrated_flag:
+            self._find_obstacles()
+            self._draw_obstacles()
+        return self.display.copy()
 
 class RobotinoUnit:
     def __init__(self, config: dict) -> None:
@@ -391,7 +418,8 @@ class RobotinoUnit:
         self.IP_ADDRESS: str = config["socket_params"]["IP_ADDRESS"]
         self.PORT: int = config["socket_params"]["PORT"]
         
-        if config['socket_params']['enable']:
+        self.server_enable = config['socket_params']['enable']
+        if self.server_enable:
             self.robotino_socket: (socket.socket | None) = self._connect_to_robotino()
         
         self.curr_pose2D: np.ndarray = np.array([0, 0])
@@ -436,23 +464,24 @@ class RobotinoUnit:
     
     # Отключение от Robotino
     def disconnect(self) -> None:
-        if self.config['socket_params']['enable']:
+        if self.server_enable:
             self.robotino_socket.close() # pyright: ignore[reportOptionalMemberAccess]
     
     # Отправка управляющих сигналов
     def _send_velocity(self, vx: float, vy: float, omega: float):
-        url = f"http://{self.IP_ADDRESS}/data/omnidrive"
-        data = [vx, vy, omega]
-        try:
-            response = requests.post(url, json=data)
-            if response.status_code == 200:
-                # print(f"Sent Vx: {vx}, Vy: {vy}, w: {omega}")
-                pass
-            else:
-                print(f"Send error: {response.status_code} - {response.text}")
-                pass
-        except Exception as e:
-            print(f"Error sending data: {e}")
+        if self.server_enable:
+            url = f"http://{self.IP_ADDRESS}/data/omnidrive"
+            data = [vx, vy, omega]
+            try:
+                response = requests.post(url, json=data)
+                if response.status_code == 200:
+                    # print(f"Sent Vx: {vx}, Vy: {vy}, w: {omega}")
+                    pass
+                else:
+                    print(f"Send error: {response.status_code} - {response.text}")
+                    pass
+            except Exception as e:
+                print(f"Error sending data: {e}")
 
     # Расчёт результирующего вектора скорости робота
     def _compute_velocity(
