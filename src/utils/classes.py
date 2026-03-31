@@ -31,18 +31,21 @@ class Logger:
                                   "pos_x_px", "pos_y_px",
                                   "vx_px_s", "vy_px_s",
                                   "speed_px_s",
-                                  "target_x_px", "target_y_px"])
+                                  "target_vx_px_s", "target_vy_px_s",
+                                  "target_speed_px_s",])
         # Сбрасываем буфер на диск, чтобы заголовок записался сразу
         self.log_file.flush()
 
-    def write_log(self, t: float, pos: np.ndarray, vel: np.ndarray, target: np.ndarray) -> None:
+    def write_log(self, t: float, pos: np.ndarray, vel: np.ndarray, target_vel: np.ndarray) -> None:
         speed: float = float(np.linalg.norm(vel))
+        target_speed: float = float(np.linalg.norm(target_vel))
         self.csv_writer.writerow([
             f"{t:.6f}",
             f"{pos[0]:.3f}", f"{pos[1]:.3f}",
             f"{vel[0]:.6f}", f"{vel[1]:.6f}",
             f"{speed:.6f}",
-            f"{target[0]:.6f}", f"{target[1]:.6f}"
+            f"{target_vel[0]:.6f}", f"{target_vel[1]:.6f}",
+            f"{target_speed:.6f}"
         ])
     
     def close(self) -> None:
@@ -79,7 +82,7 @@ class CameraProcessor:
         )
 
         # Изображение для обработки и отображения
-        self.frame: np.ndarray = np.zeros((self.ORIG_SIZE[0], self.ORIG_SIZE[1], 3), dtype=np.uint8)
+        self.frame: np.ndarray = np.zeros((self.ORIG_SIZE[1], self.ORIG_SIZE[0], 3), dtype=np.uint8)
         self.display: np.ndarray = np.zeros((self.OUTPUT_SIZE[0], self.OUTPUT_SIZE[1], 3), dtype=np.uint8)
         self.mask: np.ndarray = np.zeros((self.OUTPUT_SIZE[0], self.OUTPUT_SIZE[1]), dtype=np.uint8)
         self.pooled_mask: np.ndarray = np.zeros((self.OUTPUT_SIZE[0], self.OUTPUT_SIZE[1]), dtype=np.uint8)
@@ -107,6 +110,10 @@ class CameraProcessor:
         else:
             self.frame = frame.copy()
         self.display = frame.copy()
+        
+        if self.system_calibrated_flag:
+            self._find_obstacles()
+            self._draw_obstacles()
     
     # Предобработка кадров (выравнивание гистограммы, резкость)
     def _frame_preprocessing(self, frame: np.ndarray) -> np.ndarray:
@@ -367,7 +374,7 @@ class CameraProcessor:
             center=self.trans_center
         )
     
-        return (np.array([center_x, center_y], dtype=np.int16), angle)
+        return (pose_2D.astype(np.int16), angle)
     
     # Проецирование точки на поверхность с учётом камеры
     def _project_floor_point(
@@ -400,17 +407,11 @@ class CameraProcessor:
 
     # Вернуть обработанное изображение
     def get_display(self) -> np.ndarray:
-        if self.system_calibrated_flag:
-            self._find_obstacles()
-            self._draw_obstacles()
         return self.display.copy()
     
     # Вернуть обработанное изображение
     def get_mask(self) -> np.ndarray:
-        if self.system_calibrated_flag:
-            self._find_obstacles()
-            self._draw_obstacles()
-        return self.display.copy()
+        return self.mask.copy()
 
 class RobotinoUnit:
     def __init__(self, config: dict) -> None:
@@ -424,6 +425,8 @@ class RobotinoUnit:
         
         self.curr_pose2D: np.ndarray = np.array([0, 0])
         self.curr_angle: float = 0.0
+        
+        self.velocity: np.ndarray = np.array([0.0, 0.0])
         
         self.comp_matrix = np.array([[0, -1],
                                      [1, 0]])
@@ -439,17 +442,30 @@ class RobotinoUnit:
                     tolerance=self.config["move"]["dist_stop"],
                     k_p=self.config["move"]["k_prop"]
                 )
+        
+        velocity = self._rotate_vector(velocity)
+        self.velocity = velocity
+        
         self._send_velocity(velocity[0], velocity[1], 0)
     
     # Управление по скоростям
     def navigate_velocity(self, velocity, omega=0) -> None:
+        velocity = self._rotate_vector(velocity)
+        self.velocity = velocity
+        
         self._send_velocity(velocity[0], velocity[1], omega)
     
     # Обновление текущего положения робота
-    def update_state(self, curr_pose, angle: float) -> None:
+    def update_state(self, curr_pose: np.ndarray, angle: float) -> None:
         self.curr_pose2D = curr_pose
         self.curr_angle = angle
 
+    # Поворот вектора скорости с учётом ориентации полигона и поворота робота
+    def _rotate_vector(self, vector: np.ndarray) -> np.ndarray:
+        rotation_matrix = np.array([[math.cos(self.curr_angle), -math.sin(self.curr_angle)],
+                                     [math.sin(self.curr_angle), math.cos(self.curr_angle)]])
+        return vector @ self.comp_matrix @ rotation_matrix
+    
     # Подключение к Robotino
     def _connect_to_robotino(self) -> (socket.socket | None):
         try:
@@ -465,7 +481,8 @@ class RobotinoUnit:
     # Отключение от Robotino
     def disconnect(self) -> None:
         if self.server_enable:
-            self.robotino_socket.close() # pyright: ignore[reportOptionalMemberAccess]
+            if self.robotino_socket is not None:
+                self.robotino_socket.close()
     
     # Отправка управляющих сигналов
     def _send_velocity(self, vx: float, vy: float, omega: float):
@@ -473,7 +490,7 @@ class RobotinoUnit:
             url = f"http://{self.IP_ADDRESS}/data/omnidrive"
             data = [vx, vy, omega]
             try:
-                response = requests.post(url, json=data)
+                response = requests.post(url, json=data, timeout=0.05)
                 if response.status_code == 200:
                     # print(f"Sent Vx: {vx}, Vy: {vy}, w: {omega}")
                     pass
@@ -619,6 +636,11 @@ class AStarPlanner:
         # --- Проверка допустимости старта и цели ---
         if pooled_mask[start] == 0:
             return []
+        
+        if not (0 <= start[0] < height and 0 <= start[1] < width):
+            return []
+        if not (0 <= goal[0] < height and 0 <= goal[1] < width):
+            return []
 
         if pooled_mask[goal] == 0:
             return []
@@ -744,24 +766,23 @@ class AStarPlanner:
     # Вывод информации о пути
     def print_path_info(
         self,
-        path: List[Tuple[int, int]],
     ) -> None:
         """
         Выводит инфографику построенного пути.
         """
         
-        if len(path) == 0:
+        if len(self.path) == 0:
             print("\n===== PATH INFO =====")
             print("Path: NOT FOUND")
             print("=====================\n")
             return
         
         # --- Старт и цель ---
-        start_node: np.ndarray = self.path[0]
-        goal_node: np.ndarray = self.path[-1]
+        start_node: Tuple[int, int] = self.path[0]
+        goal_node: Tuple[int, int] = self.path[-1]
         
-        start_px: np.ndarray = self._grid_to_pixel(start_node)
-        goal_px: np.ndarray = self._grid_to_pixel(goal_node)
+        start_px: Tuple[int, int] = self._grid_to_pixel(start_node)
+        goal_px: Tuple[int, int] = self._grid_to_pixel(goal_node)
         
         # --- Длина пути по сетке ---
         length_grid: float = 0.0
@@ -775,8 +796,7 @@ class AStarPlanner:
         
         # --- Прямое расстояние ---
         direct_dist_px: float = float(
-            np.linalg.norm(goal_px.astype(np.float32) -
-                        start_px.astype(np.float32))
+            np.linalg.norm(np.array(goal_px) - np.array(start_px))
         )
         
         curvature_ratio: float = (
@@ -800,15 +820,134 @@ class AStarPlanner:
     # Пересчёт положения точки пути на центр дискретизированного пикселя
     def _grid_to_pixel(
         self,
-        node: np.ndarray,
+        node: Tuple[int, int],
     ) -> Tuple[int, int]:
         
         return (node[0] * self.grid_step + self.grid_step // 2,
                 node[1] * self.grid_step + self.grid_step // 2)
 
 class SplineController:
-    def __init__(self, config) -> None:
+    def __init__(self, config: dict) -> None:
         self.config = config
-        self.path: List[np.ndarray] = []
-        
+
+        self.path: List[Tuple[int, int]] = []
+
+        # Параметры сплайна
+        self.points: np.ndarray | None = None
+        self.arc_lengths: np.ndarray | None = None
+        self.total_length: float = 0.0
+
+        # Текущее положение по длине дуги
+        self.current_s: float = 0.0
+
         print("SplineController initialised!")
+
+    # ================= Загрузка пути =================
+    def load_path(self, path: List[Tuple[int, int]]) -> None:
+        self.path = path.copy()
+        self._prepare_spline()
+
+    # ================= Подготовка сплайна =================
+    def _prepare_spline(self) -> None:
+        if len(self.path) < 2:
+            self.points = None
+            return
+
+        # Перевод (y, x) -> (x, y)
+        pts = np.array([(p[1], p[0]) for p in self.path], dtype=np.float32)
+
+        # --- Удаление дубликатов ---
+        diff = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+        mask = np.insert(diff > 1e-3, 0, True)
+        pts = pts[mask]
+        pts = self._resample_path(pts)
+
+        # --- Вычисление длины дуги ---
+        distances = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+        arc_lengths = np.insert(np.cumsum(distances), 0, 0.0)
+
+        self.points = pts
+        self.arc_lengths = arc_lengths
+        self.total_length = arc_lengths[-1]
+
+        self.current_s = 0.0
+
+    # Интерполяция пути с равномерной дискретизацией
+    def _resample_path(self, pts: np.ndarray, step: float = 10.0) -> np.ndarray:
+        new_pts = [pts[0]]
+        for i in range(1, len(pts)):
+            p0, p1 = pts[i-1], pts[i]
+            dist = np.linalg.norm(p1 - p0)
+            n = max(int(dist // step), 1)
+            for j in range(1, n+1):
+                new_pts.append(p0 + (p1 - p0) * j / n)
+        return np.array(new_pts)
+
+    # ================= Интерполяция =================
+    def _interpolate(self, s: float) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Возвращает:
+            position: np.ndarray (2,)
+            tangent : np.ndarray (2,) (нормализованный)
+        """
+
+        if self.points is None or self.arc_lengths is None:
+            return np.zeros(2), np.zeros(2)
+
+        if s >= self.total_length:
+            return self.points[-1], np.zeros(2)
+
+        # --- поиск сегмента ---
+        idx = np.searchsorted(self.arc_lengths, s) - 1
+        idx = np.clip(idx, 0, len(self.points) - 2)
+
+        s0 = self.arc_lengths[idx]
+        s1 = self.arc_lengths[idx + 1]
+
+        t = (s - s0) / (s1 - s0 + 1e-6)
+
+        p0 = self.points[idx]
+        p1 = self.points[idx + 1]
+
+        # --- линейная интерполяция ---
+        position = (1 - t) * p0 + t * p1
+
+        # --- касательный вектор ---
+        tangent = p1 - p0
+        norm = np.linalg.norm(tangent)
+
+        if norm > 1e-6:
+            tangent = tangent / norm
+        else:
+            tangent = np.zeros(2)
+
+        return position, tangent
+
+    # ================= Основная функция =================
+    def get_velocity(self, consumpted_time: float) -> np.ndarray:
+        """
+        Возвращает скорость (vx, vy) с постоянным модулем.
+
+        Args:
+            consumpted_time: время шага (dt) [s]
+
+        Returns:
+            np.ndarray shape (2,)
+        """
+
+        if self.points is None:
+            return np.zeros(2, dtype=np.float32)
+
+        v: float = self.config["move"]["max_speed"]
+
+        # --- обновление положения вдоль сплайна ---
+        self.current_s += v * consumpted_time
+
+        if self.current_s >= self.total_length:
+            return np.zeros(2, dtype=np.float32)
+
+        _, tangent = self._interpolate(self.current_s)
+
+        velocity = v * tangent
+
+        return velocity.astype(np.float32)

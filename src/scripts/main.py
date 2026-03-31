@@ -1,3 +1,5 @@
+from logging import config
+
 import numpy as np
 import yaml, time
 import cv2
@@ -23,8 +25,11 @@ class ControlInterface:
         # Переменные окружения
         self.click_point: np.ndarray | None = None
         self.motion_started_flag: bool = False
-        self.start_time_task: float | None = None
-        self.click_point_changed: bool = False
+        self.motion_started: bool = False
+        self.start_time_task: float = 0.0
+        self.need_replan: bool = False
+        
+        self.prev_time = time.time()
         
         self.path: List[Tuple[int, int]] = []
         self.trajectory: List[np.ndarray] = []
@@ -48,19 +53,19 @@ class ControlInterface:
         
     # Отклик при нажатии кнопки мыши
     def _mouse_callback(self, event: int, x: int, y: int, flags: int, param) -> None:
-
+        
         if event == cv2.EVENT_LBUTTONDOWN:
             scale: int = 4
-            click_point = np.array((y * scale, x * scale), dtype=np.int32)
-
-            self.motion_started_flag = True
+            self.click_point = np.array((y * scale, x * scale), dtype=np.int32)
+            
+            self.motion_started = True
             self.start_time_task = time.time()
             self.trajectory.clear()
-            self.click_point_changed = True
+            self.need_replan = True
             
             self.logger.reset_and_start()
             
-            print(f"Целевая точка: {click_point}")
+            print(f"Целевая точка: {self.click_point}")
 
     # Основной цикл работы интерфейса
     def run(self):
@@ -68,7 +73,7 @@ class ControlInterface:
         try:
             while True:
                 start_time: float = time.time()
-            
+                
                 # ================= ЭТАП 1: Захват видео =================
                 ret, frame = self.cap.read()
                 
@@ -96,187 +101,67 @@ class ControlInterface:
                         do_calibrate = False
                         
                     self.camera_processor.calibrate_system(do_calibrate=do_calibrate)
-                        
                     
                 # ================= ЭТАП 3: Обработка потока видео =================
                 else:
                     
                     # ================= ЭТАП 3.1: Обнаружение препятствий =================
-                    robot_position_raw, robot_angular_position = self.camera_processor.get_robot_attitude()  # [x, y], angle
-                    self.robot.update_state(curr_pose=robot_position_raw, angle=robot_angular_position)
+                    
+                    robot_position, robot_angular_position = self.camera_processor.get_robot_attitude()  # [x, y], angle
+                    self.robot.update_state(curr_pose=robot_position, angle=robot_angular_position)
                     
                     # ================= ЭТАП 3.2: Планирование маршрута =================
-                
-                    if motion_started and not motion_started_flag:
-                        motion_started_flag = True
-                        init_logger(config['utils']['log_dir'] + "robot_motion_log_2_3.csv")
+                    
+                    if self.motion_started and not self.motion_started_flag:
+                        self.motion_started_flag = True
+                        self.logger.reset_and_start()
                         print("Движение начато")
-                    elif not motion_started and motion_started_flag:
-                        motion_started_flag = False
+                        
+                    elif not self.motion_started and self.motion_started_flag:
+                        self.motion_started_flag = False
                     
-                    robot_position_raw: np.ndarray = np.array(
-                        (center_x, center_y),
-                        dtype=np.float32
-                    )
-
-                    robot_position: np.ndarray = project_point(
-                        point=robot_position_raw,
-                        H=config['camera']['H'],
-                        h=config['camera']['h'],
-                        center=trans_center
-                    )
-
-                    if click_point is None:
-                        click_point = robot_position.copy()
-
-                    start_node: Tuple[int, int] = (robot_position[0] // config['grid']['step'],
-                                                robot_position[1] // config['grid']['step'])
+                    if self.click_point is None:
+                        self.click_point = self.robot.curr_pose2D.copy()
+                        
+                    start_node: Tuple[int, int] = (self.robot.curr_pose2D[0] // self.config['grid']['step'],
+                                                   self.robot.curr_pose2D[1] // self.config['grid']['step'])
                     
-                    goal_node: Tuple[int, int] = (click_point[0] // config['grid']['step'],
-                                                click_point[1] // config['grid']['step'])
-
-                    if motion_started and len(path) == 0:
-                        need_replan = True
-
-                    if click_point_changed:
-                        click_point_changed = False
-                        need_replan = True
-
-                    if need_replan or enable_replan:
-                        path = astar(
-                            pooled_mask,
+                    goal_node: Tuple[int, int] = (self.click_point[0] // self.config['grid']['step'],
+                                                  self.click_point[1] // self.config['grid']['step'])
+                    
+                    if self.motion_started and len(self.path) == 0:
+                        self.need_replan = True
+                    
+                    if float(np.linalg.norm(self.robot.curr_pose2D - self.click_point)) <= 30:
+                        self.motion_started = False
+                    
+                    if self.need_replan:
+                        self.path = self.grid_planner.astar(
+                            self.camera_processor.pooled_mask,
                             start_node,
                             goal_node
                             )
-
-                        need_replan = False
-
-                    if len(path) > 0:
-                        if current_target_index >= len(path):
-                            current_target_index = len(path) - 1
-
-                        curr_node = path[current_target_index]
-                        curr_target = grid_to_pixel(curr_node, config['grid']['step'])
-                        curr_target = curr_target
-                    else:
-                        curr_target = robot_position.copy()
-
-                    v_att, dist = compute_velocity(
-                        current_position=robot_position,
-                        target_position=curr_target,
-                        v_max=config['move']['max_speed'],
-                        tolerance=config['move']['dist_stop'],
-                        k_p=config['move']['k_prop']
-                    )
-
-                    if enable_replan:
-                        v_rep = compute_repulsive_field(
-                            robot_position=robot_position,
-                            obstacle_mask=mask,
-                            d0=55,
-                            k_rep=2.0e-10,
-                            influence_radius=200,
-                            v_max=config['move']['max_speed'],
-                            scale_factor=config['apf']['scale_factor']
-                        )
-                    else:
-                        v_rep = np.array([0, 0])
-
-                    v_att = v_att_old + (v_att - v_att_old) * config['move']['filter_gain']
-
-                    v_att_old = v_att
-                    velocity: np.ndarray = v_att + v_rep
-                    speed: float = float(np.linalg.norm(velocity))
-
-                    if speed > config['move']['max_speed'] and speed > 1e-6:
-                        velocity = velocity / speed * config['move']['max_speed']
-
-                    if dist:
-                        current_target_index += 1
-                        if current_target_index >= len(path):
-                            current_target_index = len(path)
-                        print(f"Point {current_target_index} reached! Moving to {current_target_index + 1}")
-
-                    if float(np.linalg.norm(robot_position - click_point)) <= 30:
-                        motion_started = False
-
-                    comp_matrix = np.array([[0, -1],
-                                            [1, 0]])
-
-                    rotation_matrix = np.array([[math.cos(angle), -math.sin(angle)],
-                                                [math.sin(angle), math.cos(angle)]])
-                    
-                    
-                    Vx, Vy = velocity @ comp_matrix @ rotation_matrix
-                    # Vx, Vy = 0.0, 0.0
-
-                    if motion_started:
-                        trajectory.append(robot_position.copy())
-                        write_log(current_time - start_time_task, robot_position, np.array([Vx, Vy]), np.array(curr_target))
-                        if config['socket_params']['enable']:
-                            send_velocity(Vx, Vy, 0)
-                    else:
-                        if config['socket_params']['enable']:
-                            send_velocity(0, 0, 0)
-                        pass
-                    
-                    # ========= Визуализация ==========
-
-                    # Отрисовка точки положения робота
-                    cv2.circle(working_area, robot_position[::-1], 25, (0, 0, 255), -1)
-
-                    # Отрисовка направления
-                    cv2.line(working_area, robot_position[::-1], click_point[::-1], (255, 0, 255), 3)
-
-                    # Отрисовка вектора скорости
-                    colors: dict = {
-                        0: (0, 0, 255),
-                        1: (0, 255, 0),
-                        2: (255, 0, 0)
-                    }
-                    scale_arrows: dict = {
-                        0: 1e3,
-                        1: 1e3,
-                        2: 1e3,
-                    }
-
-                    # print([v_att, v_rep, velocity])
-                    for ind, (comp_x, comp_y) in enumerate([v_att, v_rep, velocity]):
-                        rep_end = (
-                            int(robot_position[1] + comp_y * scale_arrows[ind]),
-                            int(robot_position[0] + comp_x * scale_arrows[ind])
-                        )
-
-                        cv2.arrowedLine(
-                            working_area,
-                            tuple(robot_position[::-1].astype(int)),
-                            rep_end,
-                            colors[ind],
-                            15
-                        )
-
-                    # Отрисовка целевой точки
-                    cv2.circle(working_area, (click_point[1], click_point[0]), 25, (30, 255, 0), -1)
-                    if len(trajectory):
-                        cv2.circle(working_area, trajectory[0][::-1], 25, (0, 128, 255), -1)
-
-                    draw_path(
-                        image=working_area,
-                        path=path,
-                        step=config['grid']['step'],
-                        circle_color=(0, 128, 255),
-                        line_color=(0, 128, 255),
-                    )
-
-                    # Отрисовка траектории реального движения робота
+                        self.grid_planner.print_path_info()
+                        self.spline_controller.load_path(self.path)
+                        self.need_replan = False
                     
                     
                     # ================= ЭТАП 3.3: Расчёт сплайна =================
-                    
+                    now = time.time()
+                    dt = now - self.prev_time
+                    target_velocity = self.spline_controller.get_velocity(dt)
+                    self.prev_time = now
                     
                     # ================= ЭТАП 3.4: Движение по сплайну =================
-                    self.robot.navigate_velocity(velocity=(0, 0), omega=0)
-
+                    # Запись траектории движения робота и данных в лог
+                    if self.motion_started:
+                        self.trajectory.append(self.robot.curr_pose2D.copy())
+                        current_time = time.time() - self.start_time_task
+                        self.logger.write_log(current_time, robot_position, self.robot.velocity, target_velocity)
+                        self.robot.navigate_velocity(velocity=target_velocity, omega=0)
+                    else:
+                        self.robot.navigate_velocity(velocity=(0, 0), omega=0)
+                
                 
                 print(f"Latency = {time.time() - start_time:.4f} s ")
 
@@ -289,19 +174,49 @@ class ControlInterface:
                         pt2 = tuple(self.trajectory[i][::-1].astype(int))
                         cv2.line(display, pt1, pt2, (255, 0, 255), 10)
                 
+                self.grid_planner.draw_path(
+                        image=display,
+                        circle_color=(0, 128, 255),
+                        line_color=(0, 128, 255),
+                    )
+                
+                # Отрисовка начальнрй точки
+                if self.click_point is not None:
+                    cv2.circle(display, (self.click_point[1], self.click_point[0]), 25, (30, 255, 0), -1)
+                
+                # Отрисовка начальнрй точки
+                if len(self.trajectory) > 0:
+                    cv2.circle(display, self.trajectory[0][::-1], 25, (0, 128, 255), -1)
+                        
+                # Отрисовка точки положения робота
+                cv2.circle(display, self.robot.curr_pose2D[::-1], 25, (0, 0, 255), -1)
+
+                # Отрисовка направления
+                cv2.line(display, self.robot.curr_pose2D[::-1], self.click_point[::-1], (255, 0, 255), 3)
+                
+                # rep_end = (
+                #         int(robot_position[1] + comp_y * 1e3),
+                #         int(robot_position[0] + comp_x * 1e3)
+                #     )
+
+                #     cv2.arrowedLine(
+                #         working_area,
+                #         tuple(robot_position[::-1].astype(int)),
+                #         rep_end,
+                #         colors[ind],
+                #         15
+                #     )
+                
                 display: np.ndarray = cv2.resize(
                     display,
                     (self.config["map_params"]["resolution"] // 4, self.config["map_params"]["resolution"] // 4)
                 )
                 cv2.imshow(self.interface_name, display)
-
-
-
-
+        
         # Обработка отключения клиента
         except (ConnectionResetError, BrokenPipeError):
             print("Client disconnected.")
-            
+        
         # Освобождение ресурсов
         finally:
             self.cap.release()
@@ -313,7 +228,6 @@ class ControlInterface:
             if self.config["socket_params"]["enable"]:
                 self.robot.disconnect()
             print("Final")
-    
 
 # Точка входа
 def main():
