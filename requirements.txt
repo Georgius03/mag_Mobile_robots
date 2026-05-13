@@ -3,3 +3,4 @@ numpy==1.26.4
 opencv-contrib-python==4.7.0.72
 opencv-python==4.11.0.86
 requests=2.33.0
+pydantic-settings

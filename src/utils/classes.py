@@ -5,7 +5,7 @@ import cv2
 import cv2.aruco as aruco
 import numpy as np
 
-from typing import Tuple, List, Dict
+from src.core.config import settings
 
 class Logger:
     def __init__(self, filename: str) -> None:
@@ -26,55 +26,64 @@ class Logger:
         self.init_writer()
 
     def init_writer(self) -> None:
-        self.csv_writer = csv.writer(self.log_file)
-        self.csv_writer.writerow(["time_s",
-                                  "pos_x_px", "pos_y_px",
-                                  "vx_px_s", "vy_px_s",
-                                  "speed_px_s",
-                                  "target_vx_px_s", "target_vy_px_s",
-                                  "target_speed_px_s",])
-        # Сбрасываем буфер на диск, чтобы заголовок записался сразу
-        self.log_file.flush()
+        if self.log_file is not None:
+            self.csv_writer = csv.writer(self.log_file)
+            self.csv_writer.writerow(["time_s",
+                                    "pos_x_px", "pos_y_px",
+                                    "vx_px_s", "vy_px_s",
+                                    "speed_px_s",
+                                    "target_vx_px_s", "target_vy_px_s",
+                                    "target_speed_px_s",])
+            # Сбрасываем буфер на диск, чтобы заголовок записался сразу
+            self.log_file.flush()
 
     def write_log(self, t: float, pos: np.ndarray, vel: np.ndarray, target_vel: np.ndarray) -> None:
         speed: float = float(np.linalg.norm(vel))
         target_speed: float = float(np.linalg.norm(target_vel))
-        self.csv_writer.writerow([
-            f"{t:.6f}",
-            f"{pos[0]:.3f}", f"{pos[1]:.3f}",
-            f"{vel[0]:.6f}", f"{vel[1]:.6f}",
-            f"{speed:.6f}",
-            f"{target_vel[0]:.6f}", f"{target_vel[1]:.6f}",
-            f"{target_speed:.6f}"
-        ])
+        if self.csv_writer is not None:
+            self.csv_writer.writerow([
+                f"{t:.6f}",
+                f"{pos[0]:.3f}", f"{pos[1]:.3f}",
+                f"{vel[0]:.6f}", f"{vel[1]:.6f}",
+                f"{speed:.6f}",
+                f"{target_vel[0]:.6f}", f"{target_vel[1]:.6f}",
+                f"{target_speed:.6f}"
+            ])
     
     def close(self) -> None:
         if self.log_file:
             self.log_file.close()
 
 class CameraProcessor:
-    def __init__(self, config) -> None:
-        self.config = config
+    def __init__(self) -> None:
+        self.config = settings
         
         # Переменные преобразований
-        self.ORIG_SIZE: Tuple[int, int] = (config['camera']['cam_shape_width'], config['camera']['cam_shape_height'])
-        self.OUTPUT_SIZE: Tuple[int, int] = (config['map_params']['resolution'], config['map_params']['resolution'])
-        self.DST_POINTS: np.ndarray = np.array([
-            [0, 0],
-            [config['map_params']['resolution'], 0],
-            [config['map_params']['resolution'], config['map_params']['resolution']],
-            [0, config['map_params']['resolution']]
-        ], dtype=np.float32)
+        self.ORIG_SIZE: tuple[int, int] = (self.config.camera.cam_shape_width, self.config.camera.cam_shape_height)
+        
+        self.OUTPUT_SIZE: tuple[int, int] = (self.config.map_params.resolution, self.config.map_params.resolution)
+        self.DST_POINTS: np.ndarray = np.array(
+            [
+                [0, 0],
+                [self.config.map_params.resolution, 0],
+                [self.config.map_params.resolution, self.config.map_params.resolution],
+                [0, self.config.map_params.resolution],
+            ], dtype=np.float32
+        )
+        
+        self.SRC_POINTS: np.ndarray = np.array(
+            [
+                self.config.map_params.left_up,
+                self.config.map_params.right_up,
+                self.config.map_params.right_down,
+                self.config.map_params.left_down,
+            ], dtype=np.float32
+        )
+        
         self.perspective_matrix: np.ndarray = np.array([[1, 0, 100],
                                                         [1, 0, 100]], dtype=np.float32)
         self.kernel_denoise: np.ndarray = np.ones((10, 10), np.uint8)
-        self.robot_radius_dilatation_pixels: int = config['grid']['robot_radius']
-        
-        # Детекторы ArUco маркеров для калибровки и трекинга
-        self.aruco_5x5 = aruco.ArucoDetector(
-            aruco.getPredefinedDictionary(aruco.DICT_5X5_50),
-            aruco.DetectorParameters()
-        )
+        self.robot_radius_dilatation_pixels: int = self.config.grid.robot_radius
 
         self.aruco_6x6 = aruco.ArucoDetector(
             aruco.getPredefinedDictionary(aruco.DICT_6X6_50),
@@ -89,7 +98,7 @@ class CameraProcessor:
         
         # Переменные окружения
         self.system_calibrated_flag: bool = False
-        self.trans_center: Tuple[int, int] = (1000, 1000)
+        self.trans_center: tuple[int, int] = (1000, 1000)
 
         print("CameraProcessor initialised!")
 
@@ -117,10 +126,10 @@ class CameraProcessor:
     
     # Предобработка кадров (выравнивание гистограммы, резкость)
     def _frame_preprocessing(self, frame: np.ndarray) -> np.ndarray:
-        if self.config['camera']['equalize_hist']:
+        if self.config.camera.equalize_hist:
             frame = self._equalize_histogram(frame)
         
-        if self.config['camera']['sharpening']:
+        if self.config.camera.sharpening:
             frame = self._sharpening(frame)
         
         return frame
@@ -142,26 +151,23 @@ class CameraProcessor:
         sharpened = cv2.filter2D(frame, -1, kernel)
         return sharpened
     
-    # Калибровка системы по ArUco маркерам
+    # Калибровка системы по точкам
     def calibrate_system(
         self,
         do_calibrate: bool = False
     ) -> None:
-        
-        corners, ids, _ = self.aruco_5x5.detectMarkers(self.frame)
-        aruco.drawDetectedMarkers(self.display, corners, ids)
-        
+        for y, x in self.SRC_POINTS:
+            cv2.circle(
+                self.display,
+                (int(x), int(y)),
+                5,
+                (0, 0, 255),
+                -1
+            )
         try:
             if do_calibrate:
-                if ids is None or len(ids) < 4:
-                    raise ValueError("Недостаточно маркеров для калибровки")
-                self.perspective_matrix = self._compute_perspective(corners=corners, ids=ids)
-
-                self.trans_center = self._compute_projected_center(
-                    perspective_matrix=self.perspective_matrix,
-                    frame_shape=self.ORIG_SIZE
-                )
-                
+                self.perspective_matrix = self._compute_perspective()
+                self.trans_center = self._compute_projected_center()
                 self.system_calibrated_flag = True
                 print("Калибровка выполнена")
 
@@ -171,65 +177,43 @@ class CameraProcessor:
     # Расчёт матрицы преобразования перспективы
     def _compute_perspective(
         self,
-        corners,
-        ids: np.ndarray,
     ) -> np.ndarray:
         """
-        Выполняет калибровку полигона по 4 ArUco маркерам.
+        Выполняет калибровку полигона по 4 точкам.
         """
-        markers: dict = {}
-
-        for i, corner in enumerate(corners):
-            marker_id: int = int(ids[i][0])
-            markers[marker_id] = corner[0]
-
-        src_points: np.ndarray = np.array([
-            markers[self.config["aruco"]["left_up"]][0],
-            markers[self.config["aruco"]["right_up"]][1],
-            markers[self.config["aruco"]["right_down"]][2],
-            markers[self.config["aruco"]["left_down"]][3]
-        ], dtype=np.float32)
-
-        matrix: np.ndarray = cv2.getPerspectiveTransform(src_points, self.DST_POINTS)
-
-        return matrix
+        
+        return cv2.getPerspectiveTransform(self.SRC_POINTS[:, ::-1], self.DST_POINTS)
     
     # Расчёт положения спроецированного исходного центра изображения (для коррекции маски)
     def _compute_projected_center(
         self,
-        perspective_matrix: np.ndarray,
-        frame_shape: Tuple[int, int]
-    ) -> Tuple[int, int]:
+    ) -> tuple[int, int]:
         """
         Возвращает положение оптического центра камеры
         после применения warpPerspective.
         """
 
-        height: int = frame_shape[0]
-        width: int = frame_shape[1]
-
         original_center: np.ndarray = np.array(
-            [[[width / 2.0, height / 2.0]]],
+            [[[self.ORIG_SIZE[0] / 2.0, self.ORIG_SIZE[1] / 2.0]]],
             dtype=np.float32
         )
 
         warped_center: np.ndarray = cv2.perspectiveTransform(
             original_center,
-            perspective_matrix
+            self.perspective_matrix
         )
 
-        return warped_center[0][0]
+        return warped_center[0][0][::-1]
     
     # Выделение препятствий на изображении
     def _find_obstacles(self) -> None:
-        
         # --- HSV ---
         hsv: np.ndarray = cv2.cvtColor(self.frame, cv2.COLOR_BGR2HSV)
 
-        if self.config['camera']['equalize_hist']:
-            mask: np.ndarray = cv2.inRange(hsv, (0, 200, 80), (179, 255, 255))
+        if self.config.camera.equalize_hist:
+            mask: np.ndarray = cv2.inRange(hsv, np.array([0, 170, 60]), np.array([179, 255, 255]))
         else:
-            mask: np.ndarray = cv2.inRange(hsv, (0, 100, 135), (179, 255, 255))
+            mask: np.ndarray = cv2.inRange(hsv, np.array([0, 100, 135]), np.array([179, 255, 255]))
 
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.kernel_denoise)
         mask = cv2.erode(mask, kernel=self.kernel_denoise, iterations=2)
@@ -242,12 +226,12 @@ class CameraProcessor:
         
         mask = self._project_floor_mask(
             mask,
-            H=self.config['camera']['H'],
-            h=self.config['camera']['h'],
+            H=self.config.camera.H,
+            h=self.config.camera.h,
             center=self.trans_center,
             )
         
-        WALL_WIDTH = self.config['grid']['WALL_WIDTH']
+        WALL_WIDTH = self.config.grid.WALL_WIDTH
         mask[:WALL_WIDTH, :] = 255
         mask[-WALL_WIDTH:, :] = 255
         mask[:, :WALL_WIDTH] = 255
@@ -257,7 +241,7 @@ class CameraProcessor:
         
         self.pooled_mask = self._maxpool2D(
             inflated_mask=mask,
-            grid_step=self.config['grid']['step']
+            grid_step=self.config.grid.step
         )
     
     # Проекция маски на поверхность с учётом камеры
@@ -266,7 +250,7 @@ class CameraProcessor:
         mask: np.ndarray,
         H: float,
         h: float,
-        center: Tuple[float, float],
+        center: tuple[float, float],
     ) -> np.ndarray:
         """
         Проекция маски на плоскость полигона.
@@ -297,8 +281,8 @@ class CameraProcessor:
 
         Returns:
             occupancy_grid:
-                1 = занято
-                0 = свободно
+                0 = занято
+                1 = свободно
         """
 
         height, width = inflated_mask.shape
@@ -350,8 +334,8 @@ class CameraProcessor:
         cv2.drawContours(self.display, contours, -1, (0, 255, 0), 2)
     
     # Трекинг робота
-    def get_robot_attitude(self) -> Tuple[np.ndarray, float]:
-        corners, ids, _ = self.aruco_6x6.detectMarkers(self.display)
+    def get_robot_attitude(self) -> tuple[np.ndarray, float] | None:
+        corners, ids, _ = self.aruco_6x6.detectMarkers(self.frame)
 
         center_x, center_y, angle = 0, 0, 0
         
@@ -366,15 +350,17 @@ class CameraProcessor:
 
             angle: float = math.atan2(dx, dy)
         
-        pose_2D: np.ndarray = np.array([center_x, center_y], dtype=int)
-        pose_2D = self._project_floor_point(
-            point=pose_2D,
-            H=self.config['camera']['H'],
-            h=self.config['camera']['h'],
-            center=self.trans_center
-        )
-    
-        return (pose_2D.astype(np.int16), angle)
+            pose_2D: np.ndarray = np.array([center_x, center_y], dtype=int)
+            pose_2D = self._project_floor_point(
+                point=pose_2D,
+                H=self.config.camera.H,
+                h=self.config.camera.h,
+                center=self.trans_center
+            )
+        
+            return (pose_2D.astype(np.int16), angle)
+        else:
+            return None
     
     # Проецирование точки на поверхность с учётом камеры
     def _project_floor_point(
@@ -382,7 +368,7 @@ class CameraProcessor:
         point: np.ndarray,
         H: float,
         h: float,
-        center: Tuple[float, float]
+        center: tuple[float, float]
     ) -> np.ndarray:
         """
         Проецирует точку на плоскость полигона
@@ -414,12 +400,12 @@ class CameraProcessor:
         return self.mask.copy()
 
 class RobotinoUnit:
-    def __init__(self, config: dict) -> None:
-        self.config: dict = config
-        self.IP_ADDRESS: str = config["socket_params"]["IP_ADDRESS"]
-        self.PORT: int = config["socket_params"]["PORT"]
+    def __init__(self) -> None:
+        self.config = settings
+        self.IP_ADDRESS: str = self.config.socket_params.IP_ADDRESS
+        self.PORT: int = self.config.socket_params.PORT
         
-        self.server_enable = config['socket_params']['enable']
+        self.server_enable = self.config.socket_params.enable
         if self.server_enable:
             self.robotino_socket: (socket.socket | None) = self._connect_to_robotino()
         
@@ -427,6 +413,9 @@ class RobotinoUnit:
         self.curr_angle: float = 0.0
         
         self.velocity: np.ndarray = np.array([0.0, 0.0])
+        
+        # self.comp_matrix = np.array([[0, -1],
+        #                              [1, 0]])
         
         self.comp_matrix = np.array([[0, -1],
                                      [1, 0]])
@@ -438,9 +427,9 @@ class RobotinoUnit:
         velocity, is_reached = self._compute_velocity(
                     current_position=self.curr_pose2D,
                     target_position=target_pose2D,
-                    v_max=self.config["move"]["max_speed"],
-                    tolerance=self.config["move"]["dist_stop"],
-                    k_p=self.config["move"]["k_prop"]
+                    v_max=self.config.move.max_speed,
+                    tolerance=self.config.move.dist_stop,
+                    k_p=self.config.move.k_prop
                 )
         
         velocity = self._rotate_vector(velocity)
@@ -488,7 +477,7 @@ class RobotinoUnit:
     def _send_velocity(self, vx: float, vy: float, omega: float):
         if self.server_enable:
             url = f"http://{self.IP_ADDRESS}/data/omnidrive"
-            data = [vx, vy, omega]
+            data = [float(vx), float(vy), float(omega)]
             try:
                 response = requests.post(url, json=data, timeout=0.05)
                 if response.status_code == 200:
@@ -508,7 +497,7 @@ class RobotinoUnit:
         v_max: float,
         tolerance: float,
         k_p: float = 1
-    ) -> Tuple[np.ndarray, bool]:
+    ) -> tuple[np.ndarray, bool]:
         """
         Вычисляет вектор линейной скорости движения к целевой точке
         в декартовой системе координат.
@@ -547,18 +536,18 @@ class RobotinoUnit:
         return velocity.astype(np.float32), False
 
 class AStarPlanner:
-    def __init__(self, config) -> None:
-        self.config = config
-        self.path: List[Tuple[int, int]] = []
-        self.grid_step: int = config['grid']['step']
+    def __init__(self) -> None:
+        self.config = settings
+        self.path: list[tuple[int, int]] = []
+        self.grid_step: int = self.config.grid.step
 
         print("AStarPlanner initialised!")
         
     # Расчёт расстояния между точками старта и целью
     def _heuristic(
         self,
-        a: Tuple[int, int],
-        b: Tuple[int, int]
+        a: tuple[int, int],
+        b: tuple[int, int]
     ) -> float:
         """
         Вычисляет эвристическую оценку расстояния между узлом a и целью b.
@@ -576,10 +565,10 @@ class AStarPlanner:
     # Восстановление пути
     def _reconstruct_path(
         self,
-        came_from: Dict[Tuple[int, int], Tuple[int, int]],
-        start: Tuple[int, int],
-        goal: Tuple[int, int]
-    ) -> List[Tuple[int, int]]:
+        came_from: dict[tuple[int, int], tuple[int, int]],
+        start: tuple[int, int],
+        goal: tuple[int, int]
+    ) -> list[tuple[int, int]]:
         """
         Восстанавливает путь от goal к start
         с использованием словаря предков came_from.
@@ -597,8 +586,8 @@ class AStarPlanner:
         if goal not in came_from:
             return []
 
-        path: List[Tuple[int, int]] = [goal]
-        current: Tuple[int, int] = goal
+        path: list[tuple[int, int]] = [goal]
+        current: tuple[int, int] = goal
 
         # Двигаемся назад по дереву поиска
         while current != start:
@@ -612,9 +601,9 @@ class AStarPlanner:
     def astar(
         self,
         pooled_mask: np.ndarray,
-        start: Tuple[int, int],
-        goal: Tuple[int, int]
-    ) -> List[Tuple[int, int]]:
+        start: tuple[int, int],
+        goal: tuple[int, int]
+    ) -> list[tuple[int, int]]:
         """
         Реализация алгоритма A* для двумерной карты.
 
@@ -647,14 +636,14 @@ class AStarPlanner:
 
         # --- Очередь с приоритетом ---
         # Храним (f_cost, координата)
-        open_set: List[Tuple[float, Tuple[int, int]]] = []
+        open_set: list[tuple[float, tuple[int, int]]] = []
         heapq.heappush(open_set, (0.0, start))
 
         # Словарь предков для восстановления пути
-        came_from: Dict[Tuple[int, int], Tuple[int, int]] = {}
+        came_from: dict[tuple[int, int], tuple[int, int]] = {}
 
         # g_cost хранит реальную стоимость пути от старта
-        g_cost: Dict[Tuple[int, int], float] = {
+        g_cost: dict[tuple[int, int], float] = {
             start: 0.0
         }
 
@@ -673,7 +662,8 @@ class AStarPlanner:
 
             # Если достигли цели — восстанавливаем путь
             if current == goal:
-                return self._reconstruct_path(came_from, start, goal)
+                self.path = self._reconstruct_path(came_from, start, goal)
+                return self.path
 
             # Проверяем всех соседей
             for dy, dx in directions:
@@ -695,7 +685,7 @@ class AStarPlanner:
                 move_cost: float = float(np.hypot(dy, dx))
 
                 tentative_g: float = g_cost[current] + move_cost
-                neighbor: Tuple[int, int] = (ny, nx)
+                neighbor: tuple[int, int] = (ny, nx)
 
                 # Если путь к соседу найден впервые
                 # или найден более короткий путь
@@ -735,11 +725,11 @@ class AStarPlanner:
         if len(self.path) < 2:
             return
 
-        pixel_points: List[Tuple[int, int]] = []
+        pixel_points: list[tuple[int, int]] = []
 
         # --- преобразование grid → pixel ---
         for node in self.path:
-            pixel_point: Tuple[int, int] = self._grid_to_pixel(node)
+            pixel_point: tuple[int, int] = self._grid_to_pixel(node)
             # OpenCV: (x, y)
             pixel_points.append(pixel_point[::-1])
 
@@ -778,11 +768,11 @@ class AStarPlanner:
             return
         
         # --- Старт и цель ---
-        start_node: Tuple[int, int] = self.path[0]
-        goal_node: Tuple[int, int] = self.path[-1]
+        start_node: tuple[int, int] = self.path[0]
+        goal_node: tuple[int, int] = self.path[-1]
         
-        start_px: Tuple[int, int] = self._grid_to_pixel(start_node)
-        goal_px: Tuple[int, int] = self._grid_to_pixel(goal_node)
+        start_px: tuple[int, int] = self._grid_to_pixel(start_node)
+        goal_px: tuple[int, int] = self._grid_to_pixel(goal_node)
         
         # --- Длина пути по сетке ---
         length_grid: float = 0.0
@@ -820,134 +810,323 @@ class AStarPlanner:
     # Пересчёт положения точки пути на центр дискретизированного пикселя
     def _grid_to_pixel(
         self,
-        node: Tuple[int, int],
-    ) -> Tuple[int, int]:
+        node: tuple[int, int],
+    ) -> tuple[int, int]:
         
         return (node[0] * self.grid_step + self.grid_step // 2,
                 node[1] * self.grid_step + self.grid_step // 2)
 
+# class SplineController:
+#     def __init__(self, config: dict) -> None:
+#         self.config = settings
+
+#         self.path: list[tuple[int, int]] = []
+
+#         # Параметры сплайна
+#         self.points: np.ndarray | None = None
+#         self.arc_lengths: np.ndarray | None = None
+#         self.total_length: float = 0.0
+
+#         # Текущее положение по длине дуги
+#         self.current_s: float = 0.0
+#         self.grid_step: int = config.grid.step
+
+#         print("SplineController initialised!")
+
+#     # ================= Загрузка пути =================
+#     def load_path(self, path: list[tuple[int, int]]) -> None:
+#         self.path = path.copy()
+#         self._prepare_spline()
+
+#     # ================= Подготовка сплайна =================
+#     def _prepare_spline(self) -> None:
+#         if len(self.path) < 2:
+#             self.points = None
+#             return
+
+#         # Перевод (y, x) -> (y, x)
+#         pts = np.array([(p[0], p[1]) for p in self.path], dtype=np.float32)
+
+#         # --- Удаление дубликатов ---
+#         diff = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+#         mask = np.insert(diff > 1e-3, 0, True)
+#         pts = pts[mask]
+#         pts = self._resample_path(pts)
+
+#         # --- Вычисление длины дуги ---
+#         distances = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+#         arc_lengths = np.insert(np.cumsum(distances), 0, 0.0)
+
+#         self.points = pts
+#         self.arc_lengths = arc_lengths
+#         self.total_length = arc_lengths[-1]
+
+#         self.current_s = 0.0
+
+#     # Интерполяция пути с равномерной дискретизацией
+#     def _resample_path(self, pts: np.ndarray, step: float = 10.0) -> np.ndarray:
+#         new_pts = [pts[0]]
+#         for i in range(1, len(pts)):
+#             p0, p1 = pts[i-1], pts[i]
+#             dist = np.linalg.norm(p1 - p0)
+#             n = max(int(dist // step), 1)
+#             for j in range(1, n+1):
+#                 new_pts.append(p0 + (p1 - p0) * j / n)
+#         return np.array(new_pts)
+
+#     # ================= Интерполяция =================
+#     def _interpolate(self, s: float) -> tuple[np.ndarray, np.ndarray]:
+#         """
+#         Возвращает:
+#             position: np.ndarray (2,)
+#             tangent : np.ndarray (2,) (нормализованный)
+#         """
+
+#         if self.points is None or self.arc_lengths is None:
+#             return np.zeros(2), np.zeros(2)
+
+#         if s >= self.total_length:
+#             return self.points[-1], np.zeros(2)
+
+#         # --- поиск сегмента ---
+#         idx = np.searchsorted(self.arc_lengths, s) - 1
+#         idx = np.clip(idx, 0, len(self.points) - 2)
+
+#         s0 = self.arc_lengths[idx]
+#         s1 = self.arc_lengths[idx + 1]
+
+#         t = (s - s0) / (s1 - s0 + 1e-6)
+
+#         p0 = self.points[idx]
+#         p1 = self.points[idx + 1]
+
+#         # --- линейная интерполяция ---
+#         position = (1 - t) * p0 + t * p1
+
+#         # --- касательный вектор ---
+#         tangent = p1 - p0
+#         norm = np.linalg.norm(tangent)
+
+#         if norm > 1e-6:
+#             tangent = tangent / norm
+#         else:
+#             tangent = np.zeros(2)
+
+#         return position, tangent
+
+#     # ================= Основная функция =================
+#     def get_velocity(self, consumpted_time: float) -> np.ndarray:
+#         """
+#         Возвращает скорость (vx, vy) с постоянным модулем.
+
+#         Args:
+#             consumpted_time: время шага (dt) [s]
+
+#         Returns:
+#             np.ndarray shape (2,)
+#         """
+
+#         if self.points is None:
+#             return np.zeros(2, dtype=np.float32)
+
+#         v: float = self.config.move.max_speed"]
+
+#         # --- обновление положения вдоль сплайна ---
+#         self.current_s += v * consumpted_time
+
+#         if self.current_s >= self.total_length:
+#             return np.zeros(2, dtype=np.float32)
+
+#         _, tangent = self._interpolate(self.current_s)
+
+#         velocity = v * tangent
+
+#         return velocity.astype(np.float32)
+    
+#     # Отрисовка сплайна на изображении
+#     def draw_spline(
+#         self,
+#         image: np.ndarray,
+#         step: float = 1.0,
+#         point_radius: int = 20,
+#         line_thickness: int = 5,
+#         color_points: tuple = (0, 255, 255),
+#         color_line: tuple = (0, 200, 200),
+#     ) -> None:
+#         """
+#         Визуализация сплайна.
+
+#         Args:
+#             image: np.ndarray — изображение (BGR)
+#             step: float — шаг дискретизации по длине дуги [px]
+#             point_radius: int — радиус точек
+#             line_thickness: int — толщина линии
+#             color_points: tuple — цвет точек
+#             color_line: tuple — цвет линии
+#         """
+
+#         if self.points is None or self.arc_lengths is None:
+#             return
+
+#         if self.total_length <= 1e-6:
+#             return
+
+#         # --- дискретизация по длине дуги ---
+#         s_values = np.arange(0, self.total_length, step)
+
+#         spline_points: list[tuple[int, int]] = []
+        
+#         for s in s_values:
+#             pos, _ = self._interpolate(s)
+
+#             # (y, x) -> OpenCV (x, y)
+#             pt = (int(pos[1]), int(pos[0]))
+#             pt: tuple[int, int] = self._grid_to_pixel(pt)
+#             spline_points.append(pt)
+
+#         # --- отрисовка точек ---
+#         for pt in spline_points:
+#             cv2.circle(
+#                 image,
+#                 pt,
+#                 point_radius,
+#                 color_points,
+#                 -1
+#             )
+            
+#         # --- отрисовка линий ---
+#         for i in range(len(spline_points) - 1):
+#             cv2.line(
+#                 image,
+#                 spline_points[i],
+#                 spline_points[i + 1],
+#                 color_line,
+#                 line_thickness
+#             )
+            
+#         pos, _ = self._interpolate(self.current_s)
+#         cv2.circle(image, (int(pos[0]), int(pos[1])), 10, (0, 0, 255), -1)
+        
+#     # Пересчёт положения точки пути на центр дискретизированного пикселя
+#     def _grid_to_pixel(
+#         self,
+#         node: tuple[int, int],
+#     ) -> tuple[int, int]:
+        
+#         return (node[0] * self.grid_step + self.grid_step // 2,
+#                 node[1] * self.grid_step + self.grid_step // 2)
+
 class SplineController:
-    def __init__(self, config: dict) -> None:
-        self.config = config
+    def __init__(self) -> None:
+        self.config = settings
 
-        self.path: List[Tuple[int, int]] = []
-
-        # Параметры сплайна
         self.points: np.ndarray | None = None
-        self.arc_lengths: np.ndarray | None = None
+        self.s: np.ndarray | None = None
+
+        # коэффициенты кубического полинома
+        self.ax = self.bx = self.cx = self.dx = None
+        self.ay = self.by = self.cy = self.dy = None
+
+        self.current_s: float = 0.0
         self.total_length: float = 0.0
 
-        # Текущее положение по длине дуги
-        self.current_s: float = 0.0
-
-        print("SplineController initialised!")
-
     # ================= Загрузка пути =================
-    def load_path(self, path: List[Tuple[int, int]]) -> None:
-        self.path = path.copy()
-        self._prepare_spline()
-
-    # ================= Подготовка сплайна =================
-    def _prepare_spline(self) -> None:
-        if len(self.path) < 2:
-            self.points = None
+    def load_path(self, path: list[tuple[int, int]]) -> None:
+        if len(path) < 2:
             return
 
-        # Перевод (y, x) -> (x, y)
-        pts = np.array([(p[1], p[0]) for p in self.path], dtype=np.float32)
+        pts = np.array([(p[1], p[0]) for p in path], dtype=np.float32)
 
-        # --- Удаление дубликатов ---
-        diff = np.linalg.norm(np.diff(pts, axis=0), axis=1)
-        mask = np.insert(diff > 1e-3, 0, True)
-        pts = pts[mask]
-        pts = self._resample_path(pts)
-
-        # --- Вычисление длины дуги ---
-        distances = np.linalg.norm(np.diff(pts, axis=0), axis=1)
-        arc_lengths = np.insert(np.cumsum(distances), 0, 0.0)
+        # длина дуги
+        ds = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+        s = np.insert(np.cumsum(ds), 0, 0.0)
 
         self.points = pts
-        self.arc_lengths = arc_lengths
-        self.total_length = arc_lengths[-1]
+        self.s = s
+        self.total_length = s[-1]
 
+        self._compute_spline()
         self.current_s = 0.0
 
-    # Интерполяция пути с равномерной дискретизацией
-    def _resample_path(self, pts: np.ndarray, step: float = 10.0) -> np.ndarray:
-        new_pts = [pts[0]]
-        for i in range(1, len(pts)):
-            p0, p1 = pts[i-1], pts[i]
-            dist = np.linalg.norm(p1 - p0)
-            n = max(int(dist // step), 1)
-            for j in range(1, n+1):
-                new_pts.append(p0 + (p1 - p0) * j / n)
-        return np.array(new_pts)
+    # ================= Кубический сплайн =================
+    def _compute_spline(self) -> None:
+        x = self.points[:, 0]
+        y = self.points[:, 1]
+        s = self.s
 
-    # ================= Интерполяция =================
-    def _interpolate(self, s: float) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Возвращает:
-            position: np.ndarray (2,)
-            tangent : np.ndarray (2,) (нормализованный)
-        """
+        self.ax, self.bx, self.cx, self.dx = self._cubic_spline_coeffs(s, x)
+        self.ay, self.by, self.cy, self.dy = self._cubic_spline_coeffs(s, y)
 
-        if self.points is None or self.arc_lengths is None:
-            return np.zeros(2), np.zeros(2)
+    def _cubic_spline_coeffs(self, s, values):
+        n = len(s) - 1
+        h = np.diff(s)
 
-        if s >= self.total_length:
-            return self.points[-1], np.zeros(2)
+        alpha = np.zeros(n)
+        for i in range(1, n):
+            alpha[i] = (3/h[i])*(values[i+1]-values[i]) - (3/h[i-1])*(values[i]-values[i-1])
 
-        # --- поиск сегмента ---
-        idx = np.searchsorted(self.arc_lengths, s) - 1
-        idx = np.clip(idx, 0, len(self.points) - 2)
+        l = np.ones(n+1)
+        mu = np.zeros(n+1)
+        z = np.zeros(n+1)
 
-        s0 = self.arc_lengths[idx]
-        s1 = self.arc_lengths[idx + 1]
+        for i in range(1, n):
+            l[i] = 2*(s[i+1]-s[i-1]) - h[i-1]*mu[i-1]
+            mu[i] = h[i]/l[i]
+            z[i] = (alpha[i] - h[i-1]*z[i-1]) / l[i]
 
-        t = (s - s0) / (s1 - s0 + 1e-6)
+        c = np.zeros(n+1)
+        b = np.zeros(n)
+        d = np.zeros(n)
+        a = values[:-1]
 
-        p0 = self.points[idx]
-        p1 = self.points[idx + 1]
+        for j in reversed(range(n)):
+            c[j] = z[j] - mu[j]*c[j+1]
+            b[j] = (values[j+1]-values[j])/h[j] - h[j]*(c[j+1]+2*c[j])/3
+            d[j] = (c[j+1]-c[j])/(3*h[j])
 
-        # --- линейная интерполяция ---
-        position = (1 - t) * p0 + t * p1
+        return a, b, c[:-1], d
 
-        # --- касательный вектор ---
-        tangent = p1 - p0
-        norm = np.linalg.norm(tangent)
+    # ================= Поиск сегмента =================
+    def _find_segment(self, s_val: float) -> int:
+        return np.searchsorted(self.s, s_val) - 1
 
-        if norm > 1e-6:
-            tangent = tangent / norm
-        else:
-            tangent = np.zeros(2)
+    # ================= Позиция =================
+    def _position(self, s_val: float) -> np.ndarray:
+        i = self._find_segment(s_val)
+        ds = s_val - self.s[i]
 
-        return position, tangent
+        x = self.ax[i] + self.bx[i]*ds + self.cx[i]*ds**2 + self.dx[i]*ds**3
+        y = self.ay[i] + self.by[i]*ds + self.cy[i]*ds**2 + self.dy[i]*ds**3
+
+        return np.array([x, y], dtype=np.float32)
+
+    # ================= Производная =================
+    def _derivative(self, s_val: float) -> np.ndarray:
+        i = self._find_segment(s_val)
+        ds = s_val - self.s[i]
+
+        dx = self.bx[i] + 2*self.cx[i]*ds + 3*self.dx[i]*ds**2
+        dy = self.by[i] + 2*self.cy[i]*ds + 3*self.dy[i]*ds**2
+
+        return np.array([dx, dy], dtype=np.float32)
 
     # ================= Основная функция =================
-    def get_velocity(self, consumpted_time: float) -> np.ndarray:
-        """
-        Возвращает скорость (vx, vy) с постоянным модулем.
-
-        Args:
-            consumpted_time: время шага (dt) [s]
-
-        Returns:
-            np.ndarray shape (2,)
-        """
-
+    def get_velocity(self, dt: float) -> np.ndarray:
         if self.points is None:
             return np.zeros(2, dtype=np.float32)
 
-        v: float = self.config["move"]["max_speed"]
+        v = self.config.move.max_speed
 
-        # --- обновление положения вдоль сплайна ---
-        self.current_s += v * consumpted_time
+        self.current_s += v * dt
 
         if self.current_s >= self.total_length:
             return np.zeros(2, dtype=np.float32)
 
-        _, tangent = self._interpolate(self.current_s)
+        tangent = self._derivative(self.current_s)
+        norm = np.linalg.norm(tangent)
 
-        velocity = v * tangent
+        if norm < 1e-6:
+            return np.zeros(2, dtype=np.float32)
 
-        return velocity.astype(np.float32)
+        direction = tangent / norm
+        return (v * direction).astype(np.float32)

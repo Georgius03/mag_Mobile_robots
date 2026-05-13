@@ -1,26 +1,25 @@
-from logging import config
-
 import numpy as np
-import yaml, time
+import time
 import cv2
 
 from typing import Tuple, List, Dict
 
 from src.utils.classes import Logger, CameraProcessor, RobotinoUnit, AStarPlanner, SplineController
+from src.core.config import settings
 
 class ControlInterface:
     # ================= Инициализация системы =================
-    def __init__(self, config) -> None:
+    def __init__(self) -> None:
         # Загрузка параметров из файла конфигурации .yaml
-        self.config = config
+        self.config = settings
         self.interface_name = "ControlInterface"
         
         # Инициализация компонентов системы
-        self.logger = Logger(filename=self.config["utils"]["log_dir"] + "robot_motion.csv")
-        self.camera_processor = CameraProcessor(config=self.config)
-        self.robot = RobotinoUnit(config=self.config)
-        self.grid_planner = AStarPlanner(config=self.config)
-        self.spline_controller = SplineController(config=self.config)
+        self.logger = Logger(filename=self.config.utils.log_dir + "robot_motion.csv")
+        self.camera_processor = CameraProcessor()
+        self.robot = RobotinoUnit()
+        self.grid_planner = AStarPlanner()
+        self.spline_controller = SplineController()
         
         # Переменные окружения
         self.click_point: np.ndarray | None = None
@@ -36,15 +35,24 @@ class ControlInterface:
         
         self._setup_capture()
         self._setup_ui()
+        
+        print("Initialization complete.")
+        print("===============================")
+        print("         В Монтану!            ")
+        print("===============================")
+        print("Delay 1 sec")
+        time.sleep(1)
+        
+        self.c = 0
     
     # Настройка видеопотока
     def _setup_capture(self):
-        if self.config['camera']['online']:
+        if self.config.camera.online:
             self.cap = cv2.VideoCapture(0)
             if not self.cap.isOpened():
                 raise RuntimeError("Ошибка открытия видео")
         else:
-            self.cap = cv2.VideoCapture(self.config['utils']['video_path'])
+            self.cap = cv2.VideoCapture(self.config.utils.video_path)
     
     # Настройка интерфейса и Callback мыши
     def _setup_ui(self):
@@ -77,9 +85,7 @@ class ControlInterface:
                 # ================= ЭТАП 1: Захват видео =================
                 ret, frame = self.cap.read()
                 
-                if not self.config['camera']['online']:
-                    D = 1900 - 1080
-                    frame = frame[:, D//2:-D//2]
+                cv2.imshow('video', frame)
                 
                 if not ret:
                     break
@@ -94,7 +100,7 @@ class ControlInterface:
                 # ================= ЭТАП 2: Калбировка системы =================
                 if not self.camera_processor.system_calibrated_flag:
                     
-                    # Если нажата клавиша "c" — выполняем калибровку по ArUco маркерам
+                    # Если нажата клавиша "c" — выполняем калибровку по точкам
                     if self.key == ord("c"):
                         do_calibrate = True
                     else:
@@ -106,9 +112,10 @@ class ControlInterface:
                 else:
                     
                     # ================= ЭТАП 3.1: Обнаружение препятствий =================
-                    
-                    robot_position, robot_angular_position = self.camera_processor.get_robot_attitude()  # [x, y], angle
-                    self.robot.update_state(curr_pose=robot_position, angle=robot_angular_position)
+                    get_cords = self.camera_processor.get_robot_attitude()
+                    if get_cords is not None:
+                        robot_position, robot_angular_position = get_cords  # [x, y], angle
+                        self.robot.update_state(curr_pose=robot_position, angle=robot_angular_position)
                     
                     # ================= ЭТАП 3.2: Планирование маршрута =================
                     
@@ -123,11 +130,11 @@ class ControlInterface:
                     if self.click_point is None:
                         self.click_point = self.robot.curr_pose2D.copy()
                         
-                    start_node: Tuple[int, int] = (self.robot.curr_pose2D[0] // self.config['grid']['step'],
-                                                   self.robot.curr_pose2D[1] // self.config['grid']['step'])
+                    start_node: Tuple[int, int] = (self.robot.curr_pose2D[0] // self.config.grid.step,
+                                                   self.robot.curr_pose2D[1] // self.config.grid.step)
                     
-                    goal_node: Tuple[int, int] = (self.click_point[0] // self.config['grid']['step'],
-                                                  self.click_point[1] // self.config['grid']['step'])
+                    goal_node: Tuple[int, int] = (self.click_point[0] // self.config.grid.step,
+                                                  self.click_point[1] // self.config.grid.step)
                     
                     if self.motion_started and len(self.path) == 0:
                         self.need_replan = True
@@ -141,6 +148,7 @@ class ControlInterface:
                             start_node,
                             goal_node
                             )
+                        
                         self.grid_planner.print_path_info()
                         self.spline_controller.load_path(self.path)
                         self.need_replan = False
@@ -148,9 +156,11 @@ class ControlInterface:
                     
                     # ================= ЭТАП 3.3: Расчёт сплайна =================
                     now = time.time()
-                    dt = now - self.prev_time
-                    target_velocity = self.spline_controller.get_velocity(dt)
+                    # dt = (now - self.prev_time) * 10
+                    dt = (now - self.prev_time) * 25
+                    target_velocity = self.spline_controller.get_velocity(dt)[::-1]
                     self.prev_time = now
+                    print(f"[INFO] Target_velocity:{target_velocity}")
                     
                     # ================= ЭТАП 3.4: Движение по сплайну =================
                     # Запись траектории движения робота и данных в лог
@@ -163,8 +173,6 @@ class ControlInterface:
                         self.robot.navigate_velocity(velocity=(0, 0), omega=0)
                 
                 
-                print(f"Latency = {time.time() - start_time:.4f} s ")
-
                 display = self.camera_processor.get_display()
                 
                 # ================= ЭТАП 4: Визуализация =================
@@ -174,11 +182,13 @@ class ControlInterface:
                         pt2 = tuple(self.trajectory[i][::-1].astype(int))
                         cv2.line(display, pt1, pt2, (255, 0, 255), 10)
                 
-                self.grid_planner.draw_path(
-                        image=display,
-                        circle_color=(0, 128, 255),
-                        line_color=(0, 128, 255),
-                    )
+                if len(self.path) > 1:
+                    self.grid_planner.draw_path(
+                            image=display,
+                            circle_color=(0, 128, 255),
+                            line_color=(0, 128, 255),
+                        )
+                    # self.spline_controller.draw_spline(display)
                 
                 # Отрисовка начальнрй точки
                 if self.click_point is not None:
@@ -192,26 +202,46 @@ class ControlInterface:
                 cv2.circle(display, self.robot.curr_pose2D[::-1], 25, (0, 0, 255), -1)
 
                 # Отрисовка направления
-                cv2.line(display, self.robot.curr_pose2D[::-1], self.click_point[::-1], (255, 0, 255), 3)
+                if self.click_point is not None and self.robot.curr_pose2D is not None:
+                    cv2.line(
+                        display,
+                        np.array(self.robot.curr_pose2D[::-1]),
+                        np.array(self.click_point[::-1]),
+                        np.array([255, 0, 255]),
+                        3,
+                        cv2.LINE_8
+                    )
                 
-                # rep_end = (
-                #         int(robot_position[1] + comp_y * 1e3),
-                #         int(robot_position[0] + comp_x * 1e3)
-                #     )
+                if self.robot.velocity is not None:
+                    rep_end = (
+                            int(self.robot.curr_pose2D[1] + self.robot.velocity[0] * 1e3),
+                            int(self.robot.curr_pose2D[0] - self.robot.velocity[1] * 1e3)
+                        )
 
-                #     cv2.arrowedLine(
-                #         working_area,
-                #         tuple(robot_position[::-1].astype(int)),
-                #         rep_end,
-                #         colors[ind],
-                #         15
-                #     )
+                    cv2.arrowedLine(
+                        display,
+                        tuple(self.robot.curr_pose2D[::-1].astype(int)),
+                        rep_end,
+                        (255, 255, 255),
+                        15
+                    )
+                    
+                p1, p2 = self.camera_processor.trans_center
+                cv2.circle(display, (int(p2), int(p1)), 20, (30, 255, 0), -1)
+                # print(f"[INFO] Trans_center{self.camera_processor.trans_center}")
                 
-                display: np.ndarray = cv2.resize(
-                    display,
-                    (self.config["map_params"]["resolution"] // 4, self.config["map_params"]["resolution"] // 4)
-                )
+                if self.camera_processor.system_calibrated_flag:
+                    display: np.ndarray = cv2.resize(
+                        display,
+                        (self.config.map_params.resolution // 4, self.config.map_params.resolution // 4)
+                    )
+                
                 cv2.imshow(self.interface_name, display)
+                
+                self.c %= 10
+                if self.c == 0:
+                    print(f"Latency = {time.time() - start_time:.4f} s ")
+                self.c += 1
         
         # Обработка отключения клиента
         except (ConnectionResetError, BrokenPipeError):
@@ -225,19 +255,15 @@ class ControlInterface:
             if self.logger is not None:
                 self.logger.close()
                 
-            if self.config["socket_params"]["enable"]:
+            if self.config.socket_params.enable:
                 self.robot.disconnect()
             print("Final")
 
 # Точка входа
 def main():
-    # Загрузка параметров из файла конфигурации .yaml
-    with open("parameters.yaml") as config_file:
-        config = yaml.safe_load(config_file)
-    print(f"System Config: {config}")
     
     # Инициализация и запуск интерфейса управления
-    interface = ControlInterface(config)
+    interface = ControlInterface()
     interface.run()
 
 # Запуск программы
