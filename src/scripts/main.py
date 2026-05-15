@@ -1,10 +1,9 @@
 import numpy as np
 import time
 import cv2
+import math
 
-from typing import Tuple, List, Dict
-
-from src.utils.classes import Logger, CameraProcessor, RobotinoUnit, AStarPlanner, SplineController
+from src.utils.classes import Logger, CameraProcessor, RobotinoUnit, AStarPlanner, SplineTrajectoryController
 from src.core.config import settings
 
 class ControlInterface:
@@ -19,7 +18,7 @@ class ControlInterface:
         self.camera_processor = CameraProcessor()
         self.robot = RobotinoUnit()
         self.grid_planner = AStarPlanner()
-        self.spline_controller = SplineController()
+        self.spline_controller = None
         
         # Переменные окружения
         self.click_point: np.ndarray | None = None
@@ -30,8 +29,9 @@ class ControlInterface:
         
         self.prev_time = time.time()
         
-        self.path: List[Tuple[int, int]] = []
-        self.trajectory: List[np.ndarray] = []
+        self.path: list[tuple[int, int]] = []
+        self.spline_points: list[tuple[int, int]] = []
+        self.trajectory: list[tuple[int, int]] = []
         
         self._setup_capture()
         self._setup_ui()
@@ -85,7 +85,7 @@ class ControlInterface:
                 # ================= ЭТАП 1: Захват видео =================
                 ret, frame = self.cap.read()
                 
-                cv2.imshow('video', frame)
+                # cv2.imshow('video', frame)
                 
                 if not ret:
                     break
@@ -128,58 +128,74 @@ class ControlInterface:
                         self.motion_started_flag = False
                     
                     if self.click_point is None:
-                        self.click_point = self.robot.curr_pose2D.copy()
-                        
-                    start_node: Tuple[int, int] = (self.robot.curr_pose2D[0] // self.config.grid.step,
-                                                   self.robot.curr_pose2D[1] // self.config.grid.step)
-                    
-                    goal_node: Tuple[int, int] = (self.click_point[0] // self.config.grid.step,
-                                                  self.click_point[1] // self.config.grid.step)
+                        self.click_point = np.array(self.robot.curr_pose2D)
                     
                     if self.motion_started and len(self.path) == 0:
                         self.need_replan = True
                     
-                    if float(np.linalg.norm(self.robot.curr_pose2D - self.click_point)) <= 30:
+                    if float(np.linalg.norm(np.array(self.robot.curr_pose2D) - np.array(self.click_point))) <= 30:
                         self.motion_started = False
                     
                     if self.need_replan:
+                        start_node: tuple[int, int] = (
+                            self.robot.curr_pose2D[0] // self.config.grid.step,
+                            self.robot.curr_pose2D[1] // self.config.grid.step
+                        )
+                        
+                        goal_node: tuple[int, int] = (
+                            self.click_point[0] // self.config.grid.step,
+                            self.click_point[1] // self.config.grid.step
+                            )
+                        
                         self.path = self.grid_planner.astar(
                             self.camera_processor.pooled_mask,
                             start_node,
                             goal_node
                             )
-                        
                         self.grid_planner.print_path_info()
-                        self.spline_controller.load_path(self.path)
+                        if len(self.path) > 1:
+                            self.path_pixels = self.grid_planner.path_to_pixels(self.path)
+                            self.spline_controller = SplineTrajectoryController(self.path_pixels, self.config.move.max_speed)
+                            self.spline_points = self.spline_controller.get_full_path()
                         self.need_replan = False
+                    
+                        print(f"[INFO] START:{start_node}, END:{goal_node}")
+                    
+                        
+                    # print(f"[INFO] Robot Pose: {self.robot.curr_pose2D}, Angular_position: {robot_angular_position}")
                     
                     
                     # ================= ЭТАП 3.3: Расчёт сплайна =================
                     now = time.time()
-                    # dt = (now - self.prev_time) * 10
-                    dt = (now - self.prev_time) * 25
-                    target_velocity = self.spline_controller.get_velocity(dt)[::-1]
+                    dt = (now - self.prev_time)
                     self.prev_time = now
-                    print(f"[INFO] Target_velocity:{target_velocity}")
                     
                     # ================= ЭТАП 3.4: Движение по сплайну =================
                     # Запись траектории движения робота и данных в лог
-                    if self.motion_started:
-                        self.trajectory.append(self.robot.curr_pose2D.copy())
+                    if self.motion_started and self.spline_controller is not None:
+                        calc_pos, vel = self.spline_controller.update(dt)
+                        print(f"[INFO] Target_velocity:{vel}")
+                        
+                        if self.spline_controller.is_finished:
+                            self.motion_started = False
+                            print("[INFO] Траектория завершена.")
+                            
+                        
+                        self.trajectory.append(self.robot.curr_pose2D)
                         current_time = time.time() - self.start_time_task
-                        self.logger.write_log(current_time, robot_position, self.robot.velocity, target_velocity)
-                        self.robot.navigate_velocity(velocity=target_velocity, omega=0)
+                        self.logger.write_log(current_time, self.robot.curr_pose2D, vel)
+                        self.robot.navigate_velocity(velocity=vel, omega=0)
                     else:
                         self.robot.navigate_velocity(velocity=(0, 0), omega=0)
-                
+
                 
                 display = self.camera_processor.get_display()
                 
                 # ================= ЭТАП 4: Визуализация =================
                 if len(self.trajectory) > 1:
                     for i in range(1, len(self.trajectory)):
-                        pt1 = tuple(self.trajectory[i-1][::-1].astype(int))
-                        pt2 = tuple(self.trajectory[i][::-1].astype(int))
+                        pt1 = tuple(self.trajectory[i-1][::-1])
+                        pt2 = tuple(self.trajectory[i][::-1])
                         cv2.line(display, pt1, pt2, (255, 0, 255), 10)
                 
                 if len(self.path) > 1:
@@ -188,7 +204,10 @@ class ControlInterface:
                             circle_color=(0, 128, 255),
                             line_color=(0, 128, 255),
                         )
-                    # self.spline_controller.draw_spline(display)
+                    
+                if len(self.spline_points) > 1:
+                    for i in range(len(self.spline_points) - 1):
+                        cv2.line(frame, self.spline_points[i], self.spline_points[i+1], (255, 0, 0), 2)
                 
                 # Отрисовка начальнрй точки
                 if self.click_point is not None:
@@ -196,18 +215,18 @@ class ControlInterface:
                 
                 # Отрисовка начальнрй точки
                 if len(self.trajectory) > 0:
-                    cv2.circle(display, self.trajectory[0][::-1], 25, (0, 128, 255), -1)
+                    cv2.circle(display, tuple(self.trajectory[0][::-1]), 25, (0, 128, 255), -1)
                         
                 # Отрисовка точки положения робота
-                cv2.circle(display, self.robot.curr_pose2D[::-1], 25, (0, 0, 255), -1)
+                cv2.circle(display, tuple(self.robot.curr_pose2D[::-1]), 25, (0, 0, 255), -1)
 
                 # Отрисовка направления
                 if self.click_point is not None and self.robot.curr_pose2D is not None:
                     cv2.line(
                         display,
-                        np.array(self.robot.curr_pose2D[::-1]),
-                        np.array(self.click_point[::-1]),
-                        np.array([255, 0, 255]),
+                        tuple(self.robot.curr_pose2D[::-1]),
+                        tuple(self.click_point[::-1]),
+                        (255, 0, 255),
                         3,
                         cv2.LINE_8
                     )
@@ -220,7 +239,7 @@ class ControlInterface:
 
                     cv2.arrowedLine(
                         display,
-                        tuple(self.robot.curr_pose2D[::-1].astype(int)),
+                        tuple(self.robot.curr_pose2D[::-1]),
                         rep_end,
                         (255, 255, 255),
                         15
@@ -229,6 +248,12 @@ class ControlInterface:
                 p1, p2 = self.camera_processor.trans_center
                 cv2.circle(display, (int(p2), int(p1)), 20, (30, 255, 0), -1)
                 # print(f"[INFO] Trans_center{self.camera_processor.trans_center}")
+                
+                
+                if len(self.spline_points) > 1:
+                    for i in range(len(self.spline_points) - 1):
+                        cv2.line(frame, self.spline_points[i], self.spline_points[i+1], (255, 0, 0), 10)
+                
                 
                 if self.camera_processor.system_calibrated_flag:
                     display: np.ndarray = cv2.resize(

@@ -7,6 +7,8 @@ import numpy as np
 
 from src.core.config import settings
 
+from scipy.interpolate import make_interp_spline
+
 class Logger:
     def __init__(self, filename: str) -> None:
         self.filename = filename  # Сохраняем имя файла
@@ -31,23 +33,18 @@ class Logger:
             self.csv_writer.writerow(["time_s",
                                     "pos_x_px", "pos_y_px",
                                     "vx_px_s", "vy_px_s",
-                                    "speed_px_s",
-                                    "target_vx_px_s", "target_vy_px_s",
-                                    "target_speed_px_s",])
+                                    "speed_px_s"])
             # Сбрасываем буфер на диск, чтобы заголовок записался сразу
             self.log_file.flush()
 
-    def write_log(self, t: float, pos: np.ndarray, vel: np.ndarray, target_vel: np.ndarray) -> None:
+    def write_log(self, t: float, pos: tuple[int, int], vel: np.ndarray) -> None:
         speed: float = float(np.linalg.norm(vel))
-        target_speed: float = float(np.linalg.norm(target_vel))
         if self.csv_writer is not None:
             self.csv_writer.writerow([
                 f"{t:.6f}",
                 f"{pos[0]:.3f}", f"{pos[1]:.3f}",
                 f"{vel[0]:.6f}", f"{vel[1]:.6f}",
                 f"{speed:.6f}",
-                f"{target_vel[0]:.6f}", f"{target_vel[1]:.6f}",
-                f"{target_speed:.6f}"
             ])
     
     def close(self) -> None:
@@ -100,6 +97,16 @@ class CameraProcessor:
         self.system_calibrated_flag: bool = False
         self.trans_center: tuple[int, int] = (1000, 1000)
 
+        self.ArUco_marker_rotate_matrix = np.array([
+            [math.cos(self.config.move.ArUco_angle), -math.sin(self.config.move.ArUco_angle)],
+            [math.sin(self.config.move.ArUco_angle), math.cos(self.config.move.ArUco_angle)]
+        ])
+        
+        self.base_rotate_matrix = np.array([
+            [math.cos(math.radians(90)), -math.sin(math.radians(90))],
+            [math.sin(math.radians(90)), math.cos(math.radians(90))]
+        ])
+        
         print("CameraProcessor initialised!")
 
     # Загрузка изображения
@@ -334,21 +341,25 @@ class CameraProcessor:
         cv2.drawContours(self.display, contours, -1, (0, 255, 0), 2)
     
     # Трекинг робота
-    def get_robot_attitude(self) -> tuple[np.ndarray, float] | None:
+    def get_robot_attitude(self) -> tuple[tuple, float] | None:
         corners, ids, _ = self.aruco_6x6.detectMarkers(self.frame)
 
         center_x, center_y, angle = 0, 0, 0
         
         if ids is not None:
-            c: np.ndarray = corners[0][0]
+            c: np.ndarray = corners[0][0][:, ::-1]
 
-            center_x: int = int(np.mean(c[:, 1]))
-            center_y: int = int(np.mean(c[:, 0]))
+            center_x: int = int(np.mean(c[:, 0]))
+            center_y: int = int(np.mean(c[:, 1]))
 
             dx: float = c[1][0] - c[0][0]
             dy: float = c[1][1] - c[0][1]
+            
+            print((center_x, center_y), (dx, dy))
 
-            angle: float = math.atan2(dx, dy)
+            direction_vector = np.array([dx, dy])
+            direction_vector = self.base_rotate_matrix @ self.ArUco_marker_rotate_matrix @ direction_vector
+            angle = math.atan2(direction_vector[1], direction_vector[0])
         
             pose_2D: np.ndarray = np.array([center_x, center_y], dtype=int)
             pose_2D = self._project_floor_point(
@@ -358,7 +369,7 @@ class CameraProcessor:
                 center=self.trans_center
             )
         
-            return (pose_2D.astype(np.int16), angle)
+            return tuple(pose_2D), angle
         else:
             return None
     
@@ -409,13 +420,10 @@ class RobotinoUnit:
         if self.server_enable:
             self.robotino_socket: (socket.socket | None) = self._connect_to_robotino()
         
-        self.curr_pose2D: np.ndarray = np.array([0, 0])
+        self.curr_pose2D: tuple[int, int] = (0, 0)
         self.curr_angle: float = 0.0
         
         self.velocity: np.ndarray = np.array([0.0, 0.0])
-        
-        # self.comp_matrix = np.array([[0, -1],
-        #                              [1, 0]])
         
         self.comp_matrix = np.array([[0, -1],
                                      [1, 0]])
@@ -445,7 +453,7 @@ class RobotinoUnit:
         self._send_velocity(velocity[0], velocity[1], omega)
     
     # Обновление текущего положения робота
-    def update_state(self, curr_pose: np.ndarray, angle: float) -> None:
+    def update_state(self, curr_pose: tuple[int, int], angle: float) -> None:
         self.curr_pose2D = curr_pose
         self.curr_angle = angle
 
@@ -492,8 +500,8 @@ class RobotinoUnit:
     # Расчёт результирующего вектора скорости робота
     def _compute_velocity(
         self,
-        current_position: np.ndarray,
-        target_position: np.ndarray,
+        current_position: tuple[int, int],
+        target_position: tuple[int, int],
         v_max: float,
         tolerance: float,
         k_p: float = 1
@@ -503,8 +511,8 @@ class RobotinoUnit:
         в декартовой системе координат.
 
         Args:
-            current_position : np.ndarray shape (2,) – текущая позиция [px]
-            target_position  : np.ndarray shape (2,) – целевая позиция [px]
+            current_position : tuple[int, int] – текущая позиция [px]
+            target_position  : tuple[int, int] – целевая позиция [px]
             v_max            : float – максимальная скорость [px/s]
             tolerance        : float – радиус достижения цели [px]
             k_p              : float – коэффициент пропорционального регулятора [1/s]
@@ -513,10 +521,10 @@ class RobotinoUnit:
             velocity : np.ndarray shape (2,) – вектор скорости [px/s]
             reached  : bool – флаг достижения цели
         """
-
+        current_pos: np.ndarray = np.array(current_position, dtype=np.float32)
+        target_pos: np.ndarray = np.array(target_position, dtype=np.float32)
         # --- Вектор ошибки ---
-        error: np.ndarray = target_position.astype(np.float32) - \
-                            current_position.astype(np.float32)
+        error: np.ndarray = target_pos - current_pos
 
         distance: float = float(np.linalg.norm(error))
 
@@ -729,9 +737,8 @@ class AStarPlanner:
 
         # --- преобразование grid → pixel ---
         for node in self.path:
-            pixel_point: tuple[int, int] = self._grid_to_pixel(node)
-            # OpenCV: (x, y)
-            pixel_points.append(pixel_point[::-1])
+            y, x = self._grid_to_pixel(node)
+            pixel_points.append((x, y))
 
         # --- отрисовка линий ---
         for i in range(len(pixel_points) - 1):
@@ -815,318 +822,87 @@ class AStarPlanner:
         
         return (node[0] * self.grid_step + self.grid_step // 2,
                 node[1] * self.grid_step + self.grid_step // 2)
-
-# class SplineController:
-#     def __init__(self, config: dict) -> None:
-#         self.config = settings
-
-#         self.path: list[tuple[int, int]] = []
-
-#         # Параметры сплайна
-#         self.points: np.ndarray | None = None
-#         self.arc_lengths: np.ndarray | None = None
-#         self.total_length: float = 0.0
-
-#         # Текущее положение по длине дуги
-#         self.current_s: float = 0.0
-#         self.grid_step: int = config.grid.step
-
-#         print("SplineController initialised!")
-
-#     # ================= Загрузка пути =================
-#     def load_path(self, path: list[tuple[int, int]]) -> None:
-#         self.path = path.copy()
-#         self._prepare_spline()
-
-#     # ================= Подготовка сплайна =================
-#     def _prepare_spline(self) -> None:
-#         if len(self.path) < 2:
-#             self.points = None
-#             return
-
-#         # Перевод (y, x) -> (y, x)
-#         pts = np.array([(p[0], p[1]) for p in self.path], dtype=np.float32)
-
-#         # --- Удаление дубликатов ---
-#         diff = np.linalg.norm(np.diff(pts, axis=0), axis=1)
-#         mask = np.insert(diff > 1e-3, 0, True)
-#         pts = pts[mask]
-#         pts = self._resample_path(pts)
-
-#         # --- Вычисление длины дуги ---
-#         distances = np.linalg.norm(np.diff(pts, axis=0), axis=1)
-#         arc_lengths = np.insert(np.cumsum(distances), 0, 0.0)
-
-#         self.points = pts
-#         self.arc_lengths = arc_lengths
-#         self.total_length = arc_lengths[-1]
-
-#         self.current_s = 0.0
-
-#     # Интерполяция пути с равномерной дискретизацией
-#     def _resample_path(self, pts: np.ndarray, step: float = 10.0) -> np.ndarray:
-#         new_pts = [pts[0]]
-#         for i in range(1, len(pts)):
-#             p0, p1 = pts[i-1], pts[i]
-#             dist = np.linalg.norm(p1 - p0)
-#             n = max(int(dist // step), 1)
-#             for j in range(1, n+1):
-#                 new_pts.append(p0 + (p1 - p0) * j / n)
-#         return np.array(new_pts)
-
-#     # ================= Интерполяция =================
-#     def _interpolate(self, s: float) -> tuple[np.ndarray, np.ndarray]:
-#         """
-#         Возвращает:
-#             position: np.ndarray (2,)
-#             tangent : np.ndarray (2,) (нормализованный)
-#         """
-
-#         if self.points is None or self.arc_lengths is None:
-#             return np.zeros(2), np.zeros(2)
-
-#         if s >= self.total_length:
-#             return self.points[-1], np.zeros(2)
-
-#         # --- поиск сегмента ---
-#         idx = np.searchsorted(self.arc_lengths, s) - 1
-#         idx = np.clip(idx, 0, len(self.points) - 2)
-
-#         s0 = self.arc_lengths[idx]
-#         s1 = self.arc_lengths[idx + 1]
-
-#         t = (s - s0) / (s1 - s0 + 1e-6)
-
-#         p0 = self.points[idx]
-#         p1 = self.points[idx + 1]
-
-#         # --- линейная интерполяция ---
-#         position = (1 - t) * p0 + t * p1
-
-#         # --- касательный вектор ---
-#         tangent = p1 - p0
-#         norm = np.linalg.norm(tangent)
-
-#         if norm > 1e-6:
-#             tangent = tangent / norm
-#         else:
-#             tangent = np.zeros(2)
-
-#         return position, tangent
-
-#     # ================= Основная функция =================
-#     def get_velocity(self, consumpted_time: float) -> np.ndarray:
-#         """
-#         Возвращает скорость (vx, vy) с постоянным модулем.
-
-#         Args:
-#             consumpted_time: время шага (dt) [s]
-
-#         Returns:
-#             np.ndarray shape (2,)
-#         """
-
-#         if self.points is None:
-#             return np.zeros(2, dtype=np.float32)
-
-#         v: float = self.config.move.max_speed"]
-
-#         # --- обновление положения вдоль сплайна ---
-#         self.current_s += v * consumpted_time
-
-#         if self.current_s >= self.total_length:
-#             return np.zeros(2, dtype=np.float32)
-
-#         _, tangent = self._interpolate(self.current_s)
-
-#         velocity = v * tangent
-
-#         return velocity.astype(np.float32)
     
-#     # Отрисовка сплайна на изображении
-#     def draw_spline(
-#         self,
-#         image: np.ndarray,
-#         step: float = 1.0,
-#         point_radius: int = 20,
-#         line_thickness: int = 5,
-#         color_points: tuple = (0, 255, 255),
-#         color_line: tuple = (0, 200, 200),
-#     ) -> None:
-#         """
-#         Визуализация сплайна.
+    def path_to_pixels(
+        self,
+        path: list[tuple[int, int]],
+    ) -> list[tuple[int, int]]:
+        path_pixels: list[tuple[int, int]] = []
+        for x, y in path:
+            path_pixels.append((y * self.grid_step + self.grid_step // 2,
+                                x * self.grid_step + self.grid_step // 2))
+        return path_pixels
 
-#         Args:
-#             image: np.ndarray — изображение (BGR)
-#             step: float — шаг дискретизации по длине дуги [px]
-#             point_radius: int — радиус точек
-#             line_thickness: int — толщина линии
-#             color_points: tuple — цвет точек
-#             color_line: tuple — цвет линии
-#         """
 
-#         if self.points is None or self.arc_lengths is None:
-#             return
-
-#         if self.total_length <= 1e-6:
-#             return
-
-#         # --- дискретизация по длине дуги ---
-#         s_values = np.arange(0, self.total_length, step)
-
-#         spline_points: list[tuple[int, int]] = []
+class SplineTrajectoryController:
+    def __init__(self, points: list[tuple[int, int]], v_max_meters: float = 0.08, num_samples: int = 200):
+        """
+        Класс для управления движением по сплайну с фиксированной скоростью V_max.
+        """
+        self.v_max = v_max_meters * 1e3
+        pts = np.array(points, dtype=float)
         
-#         for s in s_values:
-#             pos, _ = self._interpolate(s)
-
-#             # (y, x) -> OpenCV (x, y)
-#             pt = (int(pos[1]), int(pos[0]))
-#             pt: tuple[int, int] = self._grid_to_pixel(pt)
-#             spline_points.append(pt)
-
-#         # --- отрисовка точек ---
-#         for pt in spline_points:
-#             cv2.circle(
-#                 image,
-#                 pt,
-#                 point_radius,
-#                 color_points,
-#                 -1
-#             )
+        # 1. Базовая параметризация по хордам для построения геометрии
+        deltas = np.diff(pts, axis=0)
+        distances = np.sqrt(np.sum(deltas**2, axis=1))
+        
+        u_coarse = np.zeros(len(pts))
+        u_coarse[1:] = np.cumsum(distances)
+        self.total_length = u_coarse[-1]
+        
+        if self.total_length > 0:
+            u_coarse /= self.total_length
             
-#         # --- отрисовка линий ---
-#         for i in range(len(spline_points) - 1):
-#             cv2.line(
-#                 image,
-#                 spline_points[i],
-#                 spline_points[i + 1],
-#                 color_line,
-#                 line_thickness
-#             )
+        # Строим геометрический сплайн
+        self.spline = make_interp_spline(u_coarse, pts, k=3)
+        
+        # 2. Репараметризация: строим точную таблицу "Длина дуги -> Параметр u"
+        self.u_samples = np.linspace(0, 1, num_samples)
+        interp_points = self.spline(self.u_samples)
+        
+        # Вычисляем кумулятивную длину дуги для каждого u_sample
+        diffs = np.diff(interp_points, axis=0)
+        seg_lengths = np.sqrt(np.sum(diffs**2, axis=1))
+        
+        self.arc_lengths = np.zeros(num_samples)
+        self.arc_lengths[1:] = np.cumsum(seg_lengths)
+        
+        # Текущее состояние движения (пройденный путь в единицах координат)
+        self.current_distance = 0.0
+        self.is_finished = False
+
+    def get_full_path(self, steps: int = 300) -> list[tuple[int, int]]:
+        """
+        Генерирует список экранных (X, Y) координат всего сплайна для отрисовки линии траектории.
+        """
+        u_vals = np.linspace(0, 1, steps)
+        full_pts = self.spline(u_vals)
+        # Переводим в экранные координаты (деление на SCALE и инверсия Y, X в X, Y для OpenCV)
+        return [(int(p[1]), int(p[0])) for p in full_pts]
+
+    def update(self, dt: float) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Принимает прошедшее время dt и возвращает (position, velocity)
+        """
+        if self.is_finished:
+            end_pos = self.spline(1.0)
+            return end_pos, np.zeros(2)
+        
+        self.current_distance += self.v_max * dt
+        
+        if self.current_distance >= self.total_length:
+            self.current_distance = self.total_length
+            self.is_finished = True
             
-#         pos, _ = self._interpolate(self.current_s)
-#         cv2.circle(image, (int(pos[0]), int(pos[1])), 10, (0, 0, 255), -1)
+        current_u = np.interp(self.current_distance, self.arc_lengths, self.u_samples)
         
-#     # Пересчёт положения точки пути на центр дискретизированного пикселя
-#     def _grid_to_pixel(
-#         self,
-#         node: tuple[int, int],
-#     ) -> tuple[int, int]:
+        pos = self.spline(current_u)
+        geom_vel = self.spline(current_u, nu=1)
         
-#         return (node[0] * self.grid_step + self.grid_step // 2,
-#                 node[1] * self.grid_step + self.grid_step // 2)
-
-class SplineController:
-    def __init__(self) -> None:
-        self.config = settings
-
-        self.points: np.ndarray | None = None
-        self.s: np.ndarray | None = None
-
-        # коэффициенты кубического полинома
-        self.ax = self.bx = self.cx = self.dx = None
-        self.ay = self.by = self.cy = self.dy = None
-
-        self.current_s: float = 0.0
-        self.total_length: float = 0.0
-
-    # ================= Загрузка пути =================
-    def load_path(self, path: list[tuple[int, int]]) -> None:
-        if len(path) < 2:
-            return
-
-        pts = np.array([(p[1], p[0]) for p in path], dtype=np.float32)
-
-        # длина дуги
-        ds = np.linalg.norm(np.diff(pts, axis=0), axis=1)
-        s = np.insert(np.cumsum(ds), 0, 0.0)
-
-        self.points = pts
-        self.s = s
-        self.total_length = s[-1]
-
-        self._compute_spline()
-        self.current_s = 0.0
-
-    # ================= Кубический сплайн =================
-    def _compute_spline(self) -> None:
-        x = self.points[:, 0]
-        y = self.points[:, 1]
-        s = self.s
-
-        self.ax, self.bx, self.cx, self.dx = self._cubic_spline_coeffs(s, x)
-        self.ay, self.by, self.cy, self.dy = self._cubic_spline_coeffs(s, y)
-
-    def _cubic_spline_coeffs(self, s, values):
-        n = len(s) - 1
-        h = np.diff(s)
-
-        alpha = np.zeros(n)
-        for i in range(1, n):
-            alpha[i] = (3/h[i])*(values[i+1]-values[i]) - (3/h[i-1])*(values[i]-values[i-1])
-
-        l = np.ones(n+1)
-        mu = np.zeros(n+1)
-        z = np.zeros(n+1)
-
-        for i in range(1, n):
-            l[i] = 2*(s[i+1]-s[i-1]) - h[i-1]*mu[i-1]
-            mu[i] = h[i]/l[i]
-            z[i] = (alpha[i] - h[i-1]*z[i-1]) / l[i]
-
-        c = np.zeros(n+1)
-        b = np.zeros(n)
-        d = np.zeros(n)
-        a = values[:-1]
-
-        for j in reversed(range(n)):
-            c[j] = z[j] - mu[j]*c[j+1]
-            b[j] = (values[j+1]-values[j])/h[j] - h[j]*(c[j+1]+2*c[j])/3
-            d[j] = (c[j+1]-c[j])/(3*h[j])
-
-        return a, b, c[:-1], d
-
-    # ================= Поиск сегмента =================
-    def _find_segment(self, s_val: float) -> int:
-        return np.searchsorted(self.s, s_val) - 1
-
-    # ================= Позиция =================
-    def _position(self, s_val: float) -> np.ndarray:
-        i = self._find_segment(s_val)
-        ds = s_val - self.s[i]
-
-        x = self.ax[i] + self.bx[i]*ds + self.cx[i]*ds**2 + self.dx[i]*ds**3
-        y = self.ay[i] + self.by[i]*ds + self.cy[i]*ds**2 + self.dy[i]*ds**3
-
-        return np.array([x, y], dtype=np.float32)
-
-    # ================= Производная =================
-    def _derivative(self, s_val: float) -> np.ndarray:
-        i = self._find_segment(s_val)
-        ds = s_val - self.s[i]
-
-        dx = self.bx[i] + 2*self.cx[i]*ds + 3*self.dx[i]*ds**2
-        dy = self.by[i] + 2*self.cy[i]*ds + 3*self.dy[i]*ds**2
-
-        return np.array([dx, dy], dtype=np.float32)
-
-    # ================= Основная функция =================
-    def get_velocity(self, dt: float) -> np.ndarray:
-        if self.points is None:
-            return np.zeros(2, dtype=np.float32)
-
-        v = self.config.move.max_speed
-
-        self.current_s += v * dt
-
-        if self.current_s >= self.total_length:
-            return np.zeros(2, dtype=np.float32)
-
-        tangent = self._derivative(self.current_s)
-        norm = np.linalg.norm(tangent)
-
-        if norm < 1e-6:
-            return np.zeros(2, dtype=np.float32)
-
-        direction = tangent / norm
-        return (v * direction).astype(np.float32)
+        geom_speed = np.linalg.norm(geom_vel)
+        if geom_speed > 0 and not self.is_finished:
+            velocity = (geom_vel / geom_speed) * self.v_max
+        else:
+            velocity = np.zeros(2)
+            
+        return pos, velocity
