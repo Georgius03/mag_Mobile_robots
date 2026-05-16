@@ -32,6 +32,7 @@ class ControlInterface:
         self.path: list[tuple[int, int]] = []
         self.spline_points: list[tuple[int, int]] = []
         self.trajectory: list[tuple[int, int]] = []
+        self.calc_pos: tuple[int, int] = (0, 0)
         
         self._setup_capture()
         self._setup_ui()
@@ -153,10 +154,17 @@ class ControlInterface:
                             goal_node
                             )
                         self.grid_planner.print_path_info()
+                        
+                        self.path = [self.robot.curr_pose2D] + self.path[2:]
+                        self.path = self.path[1::1] # [1::2] для уменьшения количества точек в сплайне
+                        
                         if len(self.path) > 1:
                             self.path_pixels = self.grid_planner.path_to_pixels(self.path)
-                            self.spline_controller = SplineTrajectoryController(self.path_pixels, self.config.move.max_speed)
-                            self.spline_points = self.spline_controller.get_full_path()
+                            try:
+                                self.spline_controller = SplineTrajectoryController(self.path_pixels, self.config.move.max_speed)
+                                self.spline_points = self.spline_controller.get_full_path()
+                            except:
+                                continue
                         self.need_replan = False
                     
                         print(f"[INFO] START:{start_node}, END:{goal_node}")
@@ -164,17 +172,16 @@ class ControlInterface:
                         
                     # print(f"[INFO] Robot Pose: {self.robot.curr_pose2D}, Angular_position: {robot_angular_position}")
                     
-                    
                     # ================= ЭТАП 3.3: Расчёт сплайна =================
                     now = time.time()
                     dt = (now - self.prev_time)
                     self.prev_time = now
                     
                     # ================= ЭТАП 3.4: Движение по сплайну =================
-                    # Запись траектории движения робота и данных в лог
                     if self.motion_started and self.spline_controller is not None:
-                        calc_pos, vel = self.spline_controller.update(dt)
-                        print(f"[INFO] Target_velocity:{vel}")
+                        pos, vel = self.spline_controller.update(dt)
+                        self.calc_pos = tuple(pos)
+                        # print(f"[INFO] Target_velocity:{vel}")
                         
                         if self.spline_controller.is_finished:
                             self.motion_started = False
@@ -185,45 +192,43 @@ class ControlInterface:
                         current_time = time.time() - self.start_time_task
                         self.logger.write_log(current_time, self.robot.curr_pose2D, vel)
                         self.robot.navigate_velocity(velocity=vel, omega=0)
+                        print(f"[INFO] Sended rotated velocity:{self.robot.velocity}")
                     else:
                         self.robot.navigate_velocity(velocity=(0, 0), omega=0)
-
+                        
+                self.display = self.camera_processor.get_display()
                 
-                display = self.camera_processor.get_display()
                 
                 # ================= ЭТАП 4: Визуализация =================
                 if len(self.trajectory) > 1:
                     for i in range(1, len(self.trajectory)):
                         pt1 = tuple(self.trajectory[i-1][::-1])
                         pt2 = tuple(self.trajectory[i][::-1])
-                        cv2.line(display, pt1, pt2, (255, 0, 255), 10)
+                        cv2.line(self.display, pt1, pt2, (255, 0, 255), 10)
                 
                 if len(self.path) > 1:
                     self.grid_planner.draw_path(
-                            image=display,
+                            image=self.display,
+                            path=self.path,
                             circle_color=(0, 128, 255),
                             line_color=(0, 128, 255),
                         )
-                    
-                if len(self.spline_points) > 1:
-                    for i in range(len(self.spline_points) - 1):
-                        cv2.line(frame, self.spline_points[i], self.spline_points[i+1], (255, 0, 0), 2)
                 
                 # Отрисовка начальнрй точки
                 if self.click_point is not None:
-                    cv2.circle(display, (self.click_point[1], self.click_point[0]), 25, (30, 255, 0), -1)
+                    cv2.circle(self.display, (self.click_point[1], self.click_point[0]), 25, (30, 255, 0), -1)
                 
                 # Отрисовка начальнрй точки
                 if len(self.trajectory) > 0:
-                    cv2.circle(display, tuple(self.trajectory[0][::-1]), 25, (0, 128, 255), -1)
+                    cv2.circle(self.display, tuple(self.trajectory[0][::-1]), 25, (0, 128, 255), -1)
                         
                 # Отрисовка точки положения робота
-                cv2.circle(display, tuple(self.robot.curr_pose2D[::-1]), 25, (0, 0, 255), -1)
+                cv2.circle(self.display, tuple(self.robot.curr_pose2D[::-1]), 25, (0, 0, 255), -1)
 
                 # Отрисовка направления
                 if self.click_point is not None and self.robot.curr_pose2D is not None:
                     cv2.line(
-                        display,
+                        self.display,
                         tuple(self.robot.curr_pose2D[::-1]),
                         tuple(self.click_point[::-1]),
                         (255, 0, 255),
@@ -233,35 +238,37 @@ class ControlInterface:
                 
                 if self.robot.velocity is not None:
                     rep_end = (
-                            int(self.robot.curr_pose2D[1] + self.robot.velocity[0] * 1e3),
-                            int(self.robot.curr_pose2D[0] - self.robot.velocity[1] * 1e3)
+                            int(self.robot.curr_pose2D[1] + self.robot.velocity[1] * 1e3),
+                            int(self.robot.curr_pose2D[0] + self.robot.velocity[0] * 1e3)
                         )
 
                     cv2.arrowedLine(
-                        display,
+                        self.display,
                         tuple(self.robot.curr_pose2D[::-1]),
                         rep_end,
-                        (255, 255, 255),
+                        (176, 255, 100),
                         15
                     )
                     
                 p1, p2 = self.camera_processor.trans_center
-                cv2.circle(display, (int(p2), int(p1)), 20, (30, 255, 0), -1)
+                cv2.circle(self.display, (int(p2), int(p1)), 20, (30, 255, 0), -1)
                 # print(f"[INFO] Trans_center{self.camera_processor.trans_center}")
                 
                 
                 if len(self.spline_points) > 1:
                     for i in range(len(self.spline_points) - 1):
-                        cv2.line(frame, self.spline_points[i], self.spline_points[i+1], (255, 0, 0), 10)
+                        cv2.line(self.display, self.spline_points[i][::-1], self.spline_points[i+1][::-1], (255, 0, 0), 10)
                 
+                if self.calc_pos:
+                    cv2.circle(self.display, tuple(map(int, self.calc_pos)), 50, (0, 30, 255), -1)
                 
                 if self.camera_processor.system_calibrated_flag:
-                    display: np.ndarray = cv2.resize(
-                        display,
+                    self.display: np.ndarray = cv2.resize(
+                        self.display,
                         (self.config.map_params.resolution // 4, self.config.map_params.resolution // 4)
                     )
                 
-                cv2.imshow(self.interface_name, display)
+                cv2.imshow(self.interface_name, self.display)
                 
                 self.c %= 10
                 if self.c == 0:

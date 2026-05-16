@@ -7,7 +7,7 @@ import numpy as np
 
 from src.core.config import settings
 
-from scipy.interpolate import make_interp_spline
+from scipy.interpolate import make_interp_spline, make_smoothing_spline
 
 class Logger:
     def __init__(self, filename: str) -> None:
@@ -354,8 +354,6 @@ class CameraProcessor:
 
             dx: float = c[1][0] - c[0][0]
             dy: float = c[1][1] - c[0][1]
-            
-            print((center_x, center_y), (dx, dy))
 
             direction_vector = np.array([dx, dy])
             direction_vector = self.base_rotate_matrix @ self.ArUco_marker_rotate_matrix @ direction_vector
@@ -443,6 +441,7 @@ class RobotinoUnit:
         velocity = self._rotate_vector(velocity)
         self.velocity = velocity
         
+        print(f"[INFO] Vel:{velocity}")
         self._send_velocity(velocity[0], velocity[1], 0)
     
     # Управление по скоростям
@@ -461,7 +460,7 @@ class RobotinoUnit:
     def _rotate_vector(self, vector: np.ndarray) -> np.ndarray:
         rotation_matrix = np.array([[math.cos(self.curr_angle), -math.sin(self.curr_angle)],
                                      [math.sin(self.curr_angle), math.cos(self.curr_angle)]])
-        return vector @ self.comp_matrix @ rotation_matrix
+        return rotation_matrix @ vector
     
     # Подключение к Robotino
     def _connect_to_robotino(self) -> (socket.socket | None):
@@ -712,6 +711,7 @@ class AStarPlanner:
     def draw_path(
         self,
         image: np.ndarray,
+        path: list[tuple[int, int]],
         point_radius: int = 20,
         line_thickness: int = 5,
         circle_color: tuple = (128, 0, 255),
@@ -730,13 +730,13 @@ class AStarPlanner:
         :param line_color: цвет линий (BGR)
         """
 
-        if len(self.path) < 2:
+        if len(path) < 2:
             return
 
         pixel_points: list[tuple[int, int]] = []
 
         # --- преобразование grid → pixel ---
-        for node in self.path:
+        for node in path:
             y, x = self._grid_to_pixel(node)
             pixel_points.append((x, y))
 
@@ -839,7 +839,8 @@ class SplineTrajectoryController:
         """
         Класс для управления движением по сплайну с фиксированной скоростью V_max.
         """
-        self.v_max = v_max_meters * 1e3
+        self.config = settings
+        self.v_max = v_max_meters * 1000
         pts = np.array(points, dtype=float)
         
         # 1. Базовая параметризация по хордам для построения геометрии
@@ -854,7 +855,8 @@ class SplineTrajectoryController:
             u_coarse /= self.total_length
             
         # Строим геометрический сплайн
-        self.spline = make_interp_spline(u_coarse, pts, k=3)
+        # self.spline = make_interp_spline(u_coarse, pts, k=3)
+        self.spline = make_smoothing_spline(u_coarse, pts, lam=self.config.move.spline_smoothing_lambda)
         
         # 2. Репараметризация: строим точную таблицу "Длина дуги -> Параметр u"
         self.u_samples = np.linspace(0, 1, num_samples)
@@ -905,4 +907,4 @@ class SplineTrajectoryController:
         else:
             velocity = np.zeros(2)
             
-        return pos, velocity
+        return pos, velocity[::-1] / 1e3

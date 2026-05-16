@@ -29,10 +29,11 @@ class MapParams(BaseModel):
 # Параметры движения работа
 class MoveParams(BaseModel):
     dist_stop: int = 50                                                     # Расстояние для остановки при движении к точке (мм)
-    max_speed: float = 0.2                                                 # Максимальная скорость Robotino (м/с)
+    max_speed: float = 0.08                                                 # Максимальная скорость Robotino (м/с)
     k_prop: float = 1.0                                                     # Пропорциональный коэффициент
     filter_gain: float = 0.2                                                # Коэффициент фильтрации скорости
-    ArUco_angle: float = radians(180)                                 # Угол поворота для коррекции ориентации робота (для ArUco маркера)
+    ArUco_angle: float = radians(180)                                       # Угол поворота для коррекции ориентации робота (для ArUco маркера)
+    spline_smoothing_lambda: float = 1e-3                                   # Параметр сглаживания для сплайна (чем меньше, тем более гладкий сплайн, но может отклоняться от точек)
 
 # Параметры сетки и препятствий
 class GridParams(BaseModel):
