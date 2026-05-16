@@ -421,6 +421,7 @@ class RobotinoUnit:
         self.curr_pose2D: tuple[int, int] = (0, 0)
         self.curr_angle: float = 0.0
         
+        self.vel_angle_rot: np.ndarray = np.array([0.0, 0.0])
         self.velocity: np.ndarray = np.array([0.0, 0.0])
         
         self.comp_matrix = np.array([[0, -1],
@@ -439,17 +440,16 @@ class RobotinoUnit:
                 )
         
         velocity = self._rotate_vector(velocity)
-        self.velocity = velocity
+        self.velocity, self.vel_angle_rot = velocity
         
         print(f"[INFO] Vel:{velocity}")
-        self._send_velocity(velocity[0], velocity[1], 0)
+        self._send_velocity(self.velocity[0], self.velocity[1], 0)
     
     # Управление по скоростям
     def navigate_velocity(self, velocity, omega=0) -> None:
-        velocity = self._rotate_vector(velocity)
-        self.velocity = velocity
+        self.velocity, self.vel_angle_rot = self._rotate_vector(velocity)
         
-        self._send_velocity(velocity[0], velocity[1], omega)
+        self._send_velocity(self.velocity[0], self.velocity[1], omega)
     
     # Обновление текущего положения робота
     def update_state(self, curr_pose: tuple[int, int], angle: float) -> None:
@@ -457,10 +457,12 @@ class RobotinoUnit:
         self.curr_angle = angle
 
     # Поворот вектора скорости с учётом ориентации полигона и поворота робота
-    def _rotate_vector(self, vector: np.ndarray) -> np.ndarray:
-        rotation_matrix = np.array([[math.cos(self.curr_angle), -math.sin(self.curr_angle)],
-                                     [math.sin(self.curr_angle), math.cos(self.curr_angle)]])
-        return rotation_matrix @ vector
+    def _rotate_vector(self, vector: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        angle = self.curr_angle
+        rotation_matrix = np.array([[math.cos(-angle), -math.sin(-angle)],
+                                     [math.sin(-angle), math.cos(-angle)]])
+        return rotation_matrix @ vector, vector
+        # return vector
     
     # Подключение к Robotino
     def _connect_to_robotino(self) -> (socket.socket | None):
@@ -829,10 +831,9 @@ class AStarPlanner:
     ) -> list[tuple[int, int]]:
         path_pixels: list[tuple[int, int]] = []
         for x, y in path:
-            path_pixels.append((y * self.grid_step + self.grid_step // 2,
-                                x * self.grid_step + self.grid_step // 2))
+            path_pixels.append((x * self.grid_step + self.grid_step // 2,
+                                y * self.grid_step + self.grid_step // 2))
         return path_pixels
-
 
 class SplineTrajectoryController:
     def __init__(self, points: list[tuple[int, int]], v_max_meters: float = 0.08, num_samples: int = 200):
@@ -880,7 +881,7 @@ class SplineTrajectoryController:
         u_vals = np.linspace(0, 1, steps)
         full_pts = self.spline(u_vals)
         # Переводим в экранные координаты (деление на SCALE и инверсия Y, X в X, Y для OpenCV)
-        return [(int(p[1]), int(p[0])) for p in full_pts]
+        return [(int(p[0]), int(p[1])) for p in full_pts]
 
     def update(self, dt: float) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -907,4 +908,4 @@ class SplineTrajectoryController:
         else:
             velocity = np.zeros(2)
             
-        return pos, velocity[::-1] / 1e3
+        return pos, velocity / 1e3

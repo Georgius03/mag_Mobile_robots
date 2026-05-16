@@ -155,11 +155,10 @@ class ControlInterface:
                             )
                         self.grid_planner.print_path_info()
                         
-                        self.path = [self.robot.curr_pose2D] + self.path[2:]
-                        self.path = self.path[1::1] # [1::2] для уменьшения количества точек в сплайне
-                        
+                        self.path = self.path[2:][0::1]
                         if len(self.path) > 1:
                             self.path_pixels = self.grid_planner.path_to_pixels(self.path)
+                            self.path_pixels = [self.robot.curr_pose2D] + self.path_pixels
                             try:
                                 self.spline_controller = SplineTrajectoryController(self.path_pixels, self.config.move.max_speed)
                                 self.spline_points = self.spline_controller.get_full_path()
@@ -238,8 +237,8 @@ class ControlInterface:
                 
                 if self.robot.velocity is not None:
                     rep_end = (
-                            int(self.robot.curr_pose2D[1] + self.robot.velocity[1] * 1e3),
-                            int(self.robot.curr_pose2D[0] + self.robot.velocity[0] * 1e3)
+                            int(self.robot.curr_pose2D[1] + self.robot.vel_angle_rot[1] * 1e3),
+                            int(self.robot.curr_pose2D[0] + self.robot.vel_angle_rot[0] * 1e3)
                         )
 
                     cv2.arrowedLine(
@@ -260,7 +259,7 @@ class ControlInterface:
                         cv2.line(self.display, self.spline_points[i][::-1], self.spline_points[i+1][::-1], (255, 0, 0), 10)
                 
                 if self.calc_pos:
-                    cv2.circle(self.display, tuple(map(int, self.calc_pos)), 50, (0, 30, 255), -1)
+                    cv2.circle(self.display, tuple(map(int, self.calc_pos[::-1])), 50, (0, 30, 255), -1)
                 
                 if self.camera_processor.system_calibrated_flag:
                     self.display: np.ndarray = cv2.resize(
